@@ -64,14 +64,7 @@ type MigrationManager interface {
 	IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error)
 }
 
-// LimitChecker handles plan limit validation
-type LimitChecker interface {
-	CheckUserLimit(ctx context.Context, tenantID uuid.UUID) error
-	CheckProjectLimit(ctx context.Context, tenantID uuid.UUID) error
-	CheckStorageLimit(ctx context.Context, tenantID uuid.UUID) error
-	CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error
-	GetLimitsForPlan(planType string) *Limits
-}
+// Note: LimitChecker interface is now defined in limit_checker.go with flexible limits support
 
 // Storage handles tenant-aware file storage
 type Storage interface {

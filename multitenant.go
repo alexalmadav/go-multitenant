@@ -54,7 +54,7 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	migrationMgr := newMigrationManager(db, logger)
 
 	// Create limit checker
-	limitChecker := newLimitChecker(config.Limits, repository, logger)
+	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
 
 	// Create tenant manager
 	manager := tenant.NewManager(config, db, repository, schemaManager, migrationMgr, limitChecker, logger)
@@ -194,83 +194,6 @@ func (m *migrationManager) GetAppliedMigrations(ctx context.Context, tenantID uu
 func (m *migrationManager) IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error) {
 	// TODO: Implement migration check
 	return false, fmt.Errorf("not implemented")
-}
-
-// limitChecker implements tenant.LimitChecker
-type limitChecker struct {
-	config     tenant.LimitsConfig
-	repository tenant.Repository
-	logger     *zap.Logger
-}
-
-func newLimitChecker(config tenant.LimitsConfig, repository tenant.Repository, logger *zap.Logger) tenant.LimitChecker {
-	return &limitChecker{
-		config:     config,
-		repository: repository,
-		logger:     logger.Named("limits"),
-	}
-}
-
-func (lc *limitChecker) CheckUserLimit(ctx context.Context, tenantID uuid.UUID) error {
-	if !lc.config.EnforceLimits {
-		return nil
-	}
-	// TODO: Implement user limit checking
-	return nil
-}
-
-func (lc *limitChecker) CheckProjectLimit(ctx context.Context, tenantID uuid.UUID) error {
-	if !lc.config.EnforceLimits {
-		return nil
-	}
-	// TODO: Implement project limit checking
-	return nil
-}
-
-func (lc *limitChecker) CheckStorageLimit(ctx context.Context, tenantID uuid.UUID) error {
-	if !lc.config.EnforceLimits {
-		return nil
-	}
-	// TODO: Implement storage limit checking
-	return nil
-}
-
-func (lc *limitChecker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error {
-	if !lc.config.EnforceLimits {
-		return nil
-	}
-
-	if err := lc.CheckUserLimit(ctx, tenantID); err != nil {
-		return err
-	}
-
-	if err := lc.CheckProjectLimit(ctx, tenantID); err != nil {
-		return err
-	}
-
-	if err := lc.CheckStorageLimit(ctx, tenantID); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (lc *limitChecker) GetLimitsForPlan(planType string) *tenant.Limits {
-	if limits, exists := lc.config.PlanLimits[planType]; exists {
-		return limits
-	}
-
-	// Return basic plan limits as default
-	if limits, exists := lc.config.PlanLimits[tenant.PlanBasic]; exists {
-		return limits
-	}
-
-	// Fallback to hardcoded basic limits
-	return &tenant.Limits{
-		MaxUsers:     5,
-		MaxProjects:  10,
-		MaxStorageGB: 1,
-	}
 }
 
 // Re-export key types and functions for convenience

@@ -27,7 +27,8 @@ type Context struct {
 	Status     string    `json:"status"`
 }
 
-// Limits represents plan-based limits for a tenant
+// Limits represents plan-based limits for a tenant (legacy - use FlexibleLimits instead)
+// Deprecated: Use FlexibleLimits for new implementations
 type Limits struct {
 	MaxUsers     int `json:"max_users"`
 	MaxProjects  int `json:"max_projects"`
@@ -87,8 +88,10 @@ type ResolverConfig struct {
 
 // LimitsConfig contains limit enforcement configuration
 type LimitsConfig struct {
-	EnforceLimits bool               `json:"enforce_limits"`
-	PlanLimits    map[string]*Limits `json:"plan_limits"`
+	EnforceLimits bool                      `json:"enforce_limits"`
+	PlanLimits    map[string]FlexibleLimits `json:"plan_limits"`
+	LimitSchema   *LimitSchema              `json:"limit_schema,omitempty"`
+	DefaultPlan   string                    `json:"default_plan"`
 }
 
 // LoggerConfig contains logging configuration
@@ -142,8 +145,36 @@ const (
 	ResolverHeader    = "header"
 )
 
-// DefaultConfig returns a default configuration
+// DefaultConfig returns a default configuration with flexible limits
 func DefaultConfig() Config {
+	schema := DefaultLimitSchema()
+
+	// Create default plan limits using flexible system
+	basicLimits := make(FlexibleLimits)
+	basicLimits.Set("max_users", LimitTypeInt, 5)
+	basicLimits.Set("max_projects", LimitTypeInt, 10)
+	basicLimits.Set("max_storage_gb", LimitTypeInt, 1)
+	basicLimits.Set("api_calls_per_month", LimitTypeInt, 10000)
+	basicLimits.Set("advanced_features", LimitTypeBool, false)
+
+	proLimits := make(FlexibleLimits)
+	proLimits.Set("max_users", LimitTypeInt, 25)
+	proLimits.Set("max_projects", LimitTypeInt, 100)
+	proLimits.Set("max_storage_gb", LimitTypeInt, 10)
+	proLimits.Set("api_calls_per_month", LimitTypeInt, 100000)
+	proLimits.Set("advanced_features", LimitTypeBool, true)
+	proLimits.Set("priority_support", LimitTypeBool, true)
+
+	enterpriseLimits := make(FlexibleLimits)
+	enterpriseLimits.Set("max_users", LimitTypeInt, -1)    // unlimited
+	enterpriseLimits.Set("max_projects", LimitTypeInt, -1) // unlimited
+	enterpriseLimits.Set("max_storage_gb", LimitTypeInt, 100)
+	enterpriseLimits.Set("api_calls_per_month", LimitTypeInt, -1) // unlimited
+	enterpriseLimits.Set("advanced_features", LimitTypeBool, true)
+	enterpriseLimits.Set("priority_support", LimitTypeBool, true)
+	enterpriseLimits.Set("custom_integrations", LimitTypeBool, true)
+	enterpriseLimits.Set("dedicated_support", LimitTypeBool, true)
+
 	return Config{
 		Database: DatabaseConfig{
 			Driver:          "postgres",
@@ -160,22 +191,12 @@ func DefaultConfig() Config {
 		},
 		Limits: LimitsConfig{
 			EnforceLimits: true,
-			PlanLimits: map[string]*Limits{
-				PlanBasic: {
-					MaxUsers:     5,
-					MaxProjects:  10,
-					MaxStorageGB: 1,
-				},
-				PlanPro: {
-					MaxUsers:     25,
-					MaxProjects:  100,
-					MaxStorageGB: 10,
-				},
-				PlanEnterprise: {
-					MaxUsers:     -1, // unlimited
-					MaxProjects:  -1, // unlimited
-					MaxStorageGB: 100,
-				},
+			DefaultPlan:   PlanBasic,
+			LimitSchema:   schema,
+			PlanLimits: map[string]FlexibleLimits{
+				PlanBasic:      basicLimits,
+				PlanPro:        proLimits,
+				PlanEnterprise: enterpriseLimits,
 			},
 		},
 		Logger: LoggerConfig{

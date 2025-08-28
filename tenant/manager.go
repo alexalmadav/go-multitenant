@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -208,15 +207,27 @@ func (m *manager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits,
 		return nil, fmt.Errorf("failed to get tenant: %w", err)
 	}
 
-	// Get plan limits
-	limits := m.limitChecker.GetLimitsForPlan(tenant.PlanType)
-	if limits == nil {
+	// Get flexible plan limits
+	flexLimits := m.limitChecker.GetLimitsForPlan(tenant.PlanType)
+	if flexLimits == nil {
 		return nil, fmt.Errorf("unknown plan type: %s", tenant.PlanType)
 	}
 
 	// Check current usage against limits
 	if err := m.limitChecker.CheckAllLimits(ctx, tenantID); err != nil {
 		return nil, err
+	}
+
+	// Convert flexible limits to legacy format for backward compatibility
+	limits := &Limits{}
+	if maxUsers, err := flexLimits.GetInt("max_users"); err == nil {
+		limits.MaxUsers = maxUsers
+	}
+	if maxProjects, err := flexLimits.GetInt("max_projects"); err == nil {
+		limits.MaxProjects = maxProjects
+	}
+	if maxStorageGB, err := flexLimits.GetInt("max_storage_gb"); err == nil {
+		limits.MaxStorageGB = maxStorageGB
 	}
 
 	return limits, nil
