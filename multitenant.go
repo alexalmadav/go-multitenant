@@ -12,8 +12,8 @@ import (
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
-	"go.uber.org/zap"
 	_ "github.com/lib/pq"
+	"go.uber.org/zap"
 )
 
 // MultiTenant is the main struct that provides all multi-tenant functionality
@@ -64,7 +64,7 @@ func New(config tenant.Config) (*MultiTenant, error) {
 
 	// Create Gin middleware
 	ginConfig := ginmiddleware.Config{
-		SkipPaths: []string{"/health", "/metrics", "/api/public/"},
+		SkipPaths:             []string{"/health", "/metrics", "/api/public/"},
 		RequireAuthentication: true,
 	}
 	ginMw := ginmiddleware.NewMiddleware(manager, resolver, logger, ginConfig)
@@ -259,12 +259,12 @@ func (lc *limitChecker) GetLimitsForPlan(planType string) *tenant.Limits {
 	if limits, exists := lc.config.PlanLimits[planType]; exists {
 		return limits
 	}
-	
+
 	// Return basic plan limits as default
 	if limits, exists := lc.config.PlanLimits[tenant.PlanBasic]; exists {
 		return limits
 	}
-	
+
 	// Fallback to hardcoded basic limits
 	return &tenant.Limits{
 		MaxUsers:     5,
@@ -275,14 +275,14 @@ func (lc *limitChecker) GetLimitsForPlan(planType string) *tenant.Limits {
 
 // Re-export key types and functions for convenience
 type (
-	Tenant     = tenant.Tenant
-	Context    = tenant.Context
-	Config     = tenant.Config
-	Manager    = tenant.Manager
-	Resolver   = tenant.Resolver
-	Limits     = tenant.Limits
-	Stats      = tenant.Stats
-	Migration  = tenant.Migration
+	Tenant    = tenant.Tenant
+	Context   = tenant.Context
+	Config    = tenant.Config
+	Manager   = tenant.Manager
+	Resolver  = tenant.Resolver
+	Limits    = tenant.Limits
+	Stats     = tenant.Stats
+	Migration = tenant.Migration
 )
 
 // Re-export key constants
@@ -303,7 +303,7 @@ const (
 
 // Re-export helper functions
 var (
-	DefaultConfig         = tenant.DefaultConfig
-	GetTenantFromContext  = tenant.GetTenantFromContext
+	DefaultConfig          = tenant.DefaultConfig
+	GetTenantFromContext   = tenant.GetTenantFromContext
 	GetTenantIDFromContext = tenant.GetTenantIDFromContext
 )

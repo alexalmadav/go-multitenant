@@ -78,7 +78,7 @@ func (r *resolver) ExtractFromSubdomain(host string) (string, error) {
 
 	// Extract subdomain from host (e.g., "tenant.domain.com" -> "tenant")
 	parts := strings.Split(host, ".")
-	
+
 	// Need at least subdomain.domain.tld
 	if len(parts) < 3 {
 		return "", fmt.Errorf("invalid host format: %s", host)
@@ -119,7 +119,7 @@ func (r *resolver) ExtractFromPath(path string) (string, error) {
 	// Extract tenant from path (e.g., "/tenant/acme/api/projects" -> "acme")
 	pathWithoutPrefix := strings.TrimPrefix(path, prefix)
 	parts := strings.Split(pathWithoutPrefix, "/")
-	
+
 	if len(parts) == 0 || parts[0] == "" {
 		return "", errors.New("no tenant found in path")
 	}
@@ -175,5 +175,3 @@ func (r *resolver) ValidateSubdomain(subdomain string) error {
 
 	return nil
 }
-
-

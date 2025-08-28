@@ -33,7 +33,7 @@ func NewMiddleware(manager tenant.Manager, resolver tenant.Resolver, logger *zap
 	if config.ErrorHandler == nil {
 		config.ErrorHandler = defaultErrorHandler
 	}
-	
+
 	return &Middleware{
 		manager:  manager,
 		resolver: resolver,
@@ -58,7 +58,7 @@ func (m *Middleware) ResolveTenant() gin.HandlerFunc {
 				zap.String("path", c.Request.URL.Path),
 				zap.String("host", c.Request.Host),
 				zap.Error(err))
-			
+
 			m.config.ErrorHandler(c, &tenant.TenantError{
 				Code:    "TENANT_NOT_FOUND",
 				Message: "Unable to resolve tenant from request",
@@ -72,7 +72,7 @@ func (m *Middleware) ResolveTenant() gin.HandlerFunc {
 			m.logger.Error("Failed to get tenant details",
 				zap.String("tenant_id", tenantID.String()),
 				zap.Error(err))
-			
+
 			m.config.ErrorHandler(c, &tenant.TenantError{
 				TenantID: tenantID,
 				Code:     "TENANT_NOT_FOUND",
@@ -181,7 +181,7 @@ func (m *Middleware) ValidateTenant() gin.HandlerFunc {
 					zap.String("user_id", userID.String()),
 					zap.String("tenant_id", tenantCtx.TenantID.String()),
 					zap.Error(err))
-				
+
 				m.config.ErrorHandler(c, &tenant.TenantError{
 					TenantID: tenantCtx.TenantID,
 					Code:     "ACCESS_DENIED",
@@ -305,7 +305,7 @@ func (m *Middleware) SetTenantDB() gin.HandlerFunc {
 			m.logger.Error("Failed to get tenant database",
 				zap.String("tenant_id", tenantCtx.TenantID.String()),
 				zap.Error(err))
-			
+
 			m.config.ErrorHandler(c, &tenant.TenantError{
 				TenantID: tenantCtx.TenantID,
 				Code:     "DATABASE_ERROR",
@@ -388,18 +388,18 @@ func defaultErrorHandler(c *gin.Context, err error) {
 		default:
 			statusCode = http.StatusInternalServerError
 		}
-		
+
 		response = gin.H{
 			"error": gin.H{
 				"code":    e.Code,
 				"message": e.Message,
 			},
 		}
-		
+
 		if e.TenantID != uuid.Nil {
 			response["tenant_id"] = e.TenantID.String()
 		}
-		
+
 	case *tenant.ValidationError:
 		statusCode = http.StatusBadRequest
 		response = gin.H{
@@ -409,7 +409,7 @@ func defaultErrorHandler(c *gin.Context, err error) {
 				"field":   e.Field,
 			},
 		}
-		
+
 	default:
 		statusCode = http.StatusInternalServerError
 		response = gin.H{
@@ -423,5 +423,3 @@ func defaultErrorHandler(c *gin.Context, err error) {
 	c.JSON(statusCode, response)
 	c.Abort()
 }
-
-

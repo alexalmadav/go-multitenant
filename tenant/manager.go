@@ -14,14 +14,14 @@ import (
 
 // manager implements the Manager interface
 type manager struct {
-	config          Config
-	db              *sql.DB
-	repository      Repository
-	schemaManager   SchemaManager
-	migrationMgr    MigrationManager
-	limitChecker    LimitChecker
-	logger          *zap.Logger
-	connections     map[uuid.UUID]*sql.DB // Tenant-specific connections
+	config        Config
+	db            *sql.DB
+	repository    Repository
+	schemaManager SchemaManager
+	migrationMgr  MigrationManager
+	limitChecker  LimitChecker
+	logger        *zap.Logger
+	connections   map[uuid.UUID]*sql.DB // Tenant-specific connections
 }
 
 // NewManager creates a new tenant manager
@@ -322,5 +322,3 @@ func (m *manager) validateSubdomain(subdomain string) error {
 
 	return nil
 }
-
-

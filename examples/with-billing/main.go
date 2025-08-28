@@ -17,14 +17,14 @@ import (
 func main() {
 	// Create configuration with custom limits for different plans
 	config := multitenant.DefaultConfig()
-	
+
 	// Configure database
 	config.Database.DSN = "postgres://username:password@localhost:5432/multitenant_billing_db?sslmode=disable"
-	
+
 	// Configure resolver
 	config.Resolver.Strategy = multitenant.ResolverSubdomain
 	config.Resolver.Domain = "saas.example.com"
-	
+
 	// Configure custom plan limits
 	config.Limits.PlanLimits = map[string]*multitenant.Limits{
 		multitenant.PlanBasic: {
@@ -70,7 +70,7 @@ func main() {
 		RequireAuthentication: true,
 		ErrorHandler:          customErrorHandler,
 	}
-	
+
 	mw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginConfig)
 
 	// Multi-tenant API routes with authentication simulation
@@ -96,7 +96,7 @@ func main() {
 		admin.Use(simulateAdminAuth())
 		admin.Use(mw.ResolveTenant())
 		admin.Use(mw.RequireAdmin())
-		
+
 		admin.GET("/analytics", getAdminAnalytics)
 		admin.PUT("/plan", upgradePlan(mt))
 		admin.POST("/suspend", suspendTenant(mt))
@@ -116,7 +116,7 @@ func main() {
 	fmt.Println("  - http://startup.saas.example.com:8080/api/dashboard (Basic plan)")
 	fmt.Println("  - http://enterprise.saas.example.com:8080/api/dashboard (Enterprise plan)")
 	fmt.Println("  - http://localhost:8080/billing/plans")
-	
+
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
 
@@ -196,9 +196,9 @@ func getDashboard(c *gin.Context) {
 	limits, _ := ginmiddleware.GetTenantLimitsFromContext(c)
 
 	c.JSON(http.StatusOK, gin.H{
-		"welcome": fmt.Sprintf("Welcome to %s dashboard!", tenant.Subdomain),
-		"plan":    tenant.PlanType,
-		"limits":  limits,
+		"welcome":  fmt.Sprintf("Welcome to %s dashboard!", tenant.Subdomain),
+		"plan":     tenant.PlanType,
+		"limits":   limits,
 		"features": getFeaturesByPlan(tenant.PlanType),
 	})
 }
@@ -232,7 +232,7 @@ func createProjectWithLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		tenantID, _ := multitenant.GetTenantIDFromContext(c.Request.Context())
-		
+
 		// Simulate checking project limits
 		stats, err := mt.Manager.GetStats(c.Request.Context(), tenantID)
 		if err != nil {
@@ -243,9 +243,9 @@ func createProjectWithLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		limits, _ := ginmiddleware.GetTenantLimitsFromContext(c)
 		if limits.MaxProjects > 0 && stats.ProjectCount >= limits.MaxProjects {
 			c.JSON(http.StatusPaymentRequired, gin.H{
-				"error": "Project limit reached",
+				"error":        "Project limit reached",
 				"current_plan": "Consider upgrading your plan",
-				"upgrade_url": "/billing/upgrade",
+				"upgrade_url":  "/billing/upgrade",
 			})
 			return
 		}
@@ -267,7 +267,7 @@ func createProjectWithLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 func getUsage(mt *multitenant.MultiTenant) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, _ := multitenant.GetTenantIDFromContext(c.Request.Context())
-		
+
 		stats, err := mt.Manager.GetStats(c.Request.Context(), tenantID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -296,15 +296,15 @@ func getUsage(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 func getAdminAnalytics(c *gin.Context) {
 	tenant, _ := ginmiddleware.GetTenantFromGinContext(c)
-	
+
 	analytics := gin.H{
 		"tenant": tenant,
 		"metrics": gin.H{
-			"active_users":     25,
-			"monthly_revenue":  fmt.Sprintf("$%d", getPlanPrice(tenant.PlanType)),
-			"storage_usage":    "15.2GB",
-			"api_calls":        142350,
-			"last_login":       time.Now().Add(-2 * time.Hour),
+			"active_users":    25,
+			"monthly_revenue": fmt.Sprintf("$%d", getPlanPrice(tenant.PlanType)),
+			"storage_usage":   "15.2GB",
+			"api_calls":       142350,
+			"last_login":      time.Now().Add(-2 * time.Hour),
 		},
 		"alerts": []gin.H{
 			{"type": "info", "message": "Usage within normal limits"},
@@ -335,8 +335,8 @@ func upgradePlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		// Validate plan upgrade
 		if !isValidUpgrade(tenant.PlanType, req.NewPlan) {
 			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid plan upgrade",
-				"current_plan": tenant.PlanType,
+				"error":          "Invalid plan upgrade",
+				"current_plan":   tenant.PlanType,
 				"requested_plan": req.NewPlan,
 			})
 			return
@@ -350,9 +350,9 @@ func upgradePlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusOK, gin.H{
-			"message": "Plan upgraded successfully",
-			"old_plan": tenant.PlanType,
-			"new_plan": req.NewPlan,
+			"message":        "Plan upgraded successfully",
+			"old_plan":       tenant.PlanType,
+			"new_plan":       req.NewPlan,
 			"effective_date": time.Now(),
 		})
 	}
@@ -361,7 +361,7 @@ func upgradePlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 func suspendTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, _ := multitenant.GetTenantIDFromContext(c.Request.Context())
-		
+
 		if err := mt.Manager.SuspendTenant(c.Request.Context(), tenantID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -376,7 +376,7 @@ func suspendTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 func activateTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantID, _ := multitenant.GetTenantIDFromContext(c.Request.Context())
-		
+
 		if err := mt.Manager.ActivateTenant(c.Request.Context(), tenantID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -394,33 +394,33 @@ func getAvailablePlans(c *gin.Context) {
 	plans := gin.H{
 		"plans": []gin.H{
 			{
-				"name": multitenant.PlanBasic,
-				"price": 29,
+				"name":     multitenant.PlanBasic,
+				"price":    29,
 				"features": getFeaturesByPlan(multitenant.PlanBasic),
 				"limits": gin.H{
-					"users": 2,
+					"users":    2,
 					"projects": 3,
-					"storage": "1GB",
+					"storage":  "1GB",
 				},
 			},
 			{
-				"name": multitenant.PlanPro,
-				"price": 99,
+				"name":     multitenant.PlanPro,
+				"price":    99,
 				"features": getFeaturesByPlan(multitenant.PlanPro),
 				"limits": gin.H{
-					"users": 10,
+					"users":    10,
 					"projects": 25,
-					"storage": "5GB",
+					"storage":  "5GB",
 				},
 			},
 			{
-				"name": multitenant.PlanEnterprise,
-				"price": 299,
+				"name":     multitenant.PlanEnterprise,
+				"price":    299,
 				"features": getFeaturesByPlan(multitenant.PlanEnterprise),
 				"limits": gin.H{
-					"users": "unlimited",
+					"users":    "unlimited",
 					"projects": "unlimited",
-					"storage": "50GB",
+					"storage":  "50GB",
 				},
 			},
 		},
@@ -450,10 +450,10 @@ func requestPlanUpgrade(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		// In a real application, this would handle payment processing
 		// For now, we'll just simulate the upgrade request
 		c.JSON(http.StatusAccepted, gin.H{
-			"message": "Plan upgrade requested",
-			"tenant_id": req.TenantID,
-			"new_plan": req.NewPlan,
-			"status": "pending_payment",
+			"message":    "Plan upgrade requested",
+			"tenant_id":  req.TenantID,
+			"new_plan":   req.NewPlan,
+			"status":     "pending_payment",
 			"next_steps": "Complete payment to activate new plan",
 		})
 	}
@@ -482,19 +482,19 @@ func getBillingUsage(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 		billing := gin.H{
 			"tenant": gin.H{
-				"id": tenant.ID,
+				"id":   tenant.ID,
 				"name": tenant.Name,
 				"plan": tenant.PlanType,
 			},
 			"usage": stats,
 			"charges": gin.H{
 				"base_plan": getPlanPrice(tenant.PlanType),
-				"overages": 0, // Calculate based on usage
-				"total": getPlanPrice(tenant.PlanType),
+				"overages":  0, // Calculate based on usage
+				"total":     getPlanPrice(tenant.PlanType),
 			},
 			"billing_period": gin.H{
 				"start": time.Now().AddDate(0, -1, 0).Format("2006-01-02"),
-				"end": time.Now().Format("2006-01-02"),
+				"end":   time.Now().Format("2006-01-02"),
 			},
 		}
 
@@ -515,11 +515,11 @@ func customErrorHandler(c *gin.Context, err error) {
 			statusCode = http.StatusPaymentRequired
 			response = gin.H{
 				"error": gin.H{
-					"code": e.Code,
-					"message": e.Message,
+					"code":             e.Code,
+					"message":          e.Message,
 					"upgrade_required": true,
-					"upgrade_url": "/billing/upgrade",
-					"contact_sales": "/contact/sales",
+					"upgrade_url":      "/billing/upgrade",
+					"contact_sales":    "/contact/sales",
 				},
 			}
 		default:
@@ -582,5 +582,3 @@ func isValidUpgrade(currentPlan, newPlan string) bool {
 
 	return exists1 && exists2 && new > current
 }
-
-

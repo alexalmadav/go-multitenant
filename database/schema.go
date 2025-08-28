@@ -24,7 +24,7 @@ func NewSchemaManager(db *sql.DB, logger *zap.Logger, schemaPrefix string) *Sche
 	if schemaPrefix == "" {
 		schemaPrefix = "tenant_"
 	}
-	
+
 	return &SchemaManager{
 		db:           db,
 		logger:       logger.Named("schema"),
@@ -40,7 +40,7 @@ func (sm *SchemaManager) GetSchemaName(tenantID uuid.UUID) string {
 // CreateTenantSchema creates a new tenant schema with all required tables
 func (sm *SchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error {
 	schemaName := sm.GetSchemaName(tenantID)
-	
+
 	sm.logger.Info("Creating tenant schema",
 		zap.String("tenant_id", tenantID.String()),
 		zap.String("schema_name", schemaName),
@@ -83,7 +83,7 @@ func (sm *SchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.U
 // DropTenantSchema removes a tenant schema and all its data
 func (sm *SchemaManager) DropTenantSchema(ctx context.Context, tenantID uuid.UUID) error {
 	schemaName := sm.GetSchemaName(tenantID)
-	
+
 	sm.logger.Warn("Dropping tenant schema",
 		zap.String("tenant_id", tenantID.String()),
 		zap.String("schema_name", schemaName))
@@ -108,7 +108,7 @@ func (sm *SchemaManager) SchemaExists(ctx context.Context, tenantID uuid.UUID) (
 	defer cancel()
 
 	query := `SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`
-	
+
 	var exists bool
 	err := sm.db.QueryRowContext(ctx, query, schemaName).Scan(&exists)
 	if err != nil {
@@ -192,7 +192,7 @@ func (sm *SchemaManager) createTenantTables(ctx context.Context, tx *sql.Tx) err
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 		)`,
-		
+
 		`CREATE TABLE IF NOT EXISTS tasks (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			project_id UUID NOT NULL,
@@ -205,7 +205,7 @@ func (sm *SchemaManager) createTenantTables(ctx context.Context, tx *sql.Tx) err
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 		)`,
-		
+
 		`CREATE TABLE IF NOT EXISTS documents (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			project_id UUID NOT NULL,
@@ -217,7 +217,7 @@ func (sm *SchemaManager) createTenantTables(ctx context.Context, tx *sql.Tx) err
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
 		)`,
-		
+
 		`CREATE TABLE IF NOT EXISTS tenant_users (
 			user_id UUID NOT NULL,
 			role VARCHAR(50) NOT NULL DEFAULT 'user',
@@ -249,7 +249,7 @@ func (sm *SchemaManager) createTenantTables(ctx context.Context, tx *sql.Tx) err
 			RETURN NEW;
 		END;
 		$$ language 'plpgsql'`,
-		
+
 		"CREATE TRIGGER update_projects_updated_at BEFORE UPDATE ON projects FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()",
 		"CREATE TRIGGER update_tasks_updated_at BEFORE UPDATE ON tasks FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()",
 		"CREATE TRIGGER update_tenant_users_updated_at BEFORE UPDATE ON tenant_users FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()",
@@ -278,5 +278,3 @@ func (sm *SchemaManager) createTenantTables(ctx context.Context, tx *sql.Tx) err
 
 	return nil
 }
-
-

@@ -36,12 +36,12 @@ type Limits struct {
 
 // Stats represents usage statistics for a tenant
 type Stats struct {
-	TenantID       uuid.UUID `json:"tenant_id"`
-	UserCount      int       `json:"user_count"`
-	ProjectCount   int       `json:"project_count"`
-	StorageUsedGB  float64   `json:"storage_used_gb"`
-	LastActivity   time.Time `json:"last_activity"`
-	SchemaExists   bool      `json:"schema_exists"`
+	TenantID      uuid.UUID `json:"tenant_id"`
+	UserCount     int       `json:"user_count"`
+	ProjectCount  int       `json:"project_count"`
+	StorageUsedGB float64   `json:"storage_used_gb"`
+	LastActivity  time.Time `json:"last_activity"`
+	SchemaExists  bool      `json:"schema_exists"`
 }
 
 // Migration represents a tenant migration
@@ -66,22 +66,22 @@ type Config struct {
 
 // DatabaseConfig contains database-specific configuration
 type DatabaseConfig struct {
-	Driver              string        `json:"driver"`
-	DSN                 string        `json:"dsn"`
-	MaxOpenConns        int           `json:"max_open_conns"`
-	MaxIdleConns        int           `json:"max_idle_conns"`
-	ConnMaxLifetime     time.Duration `json:"conn_max_lifetime"`
-	ConnMaxIdleTime     time.Duration `json:"conn_max_idle_time"`
-	SchemaPrefix        string        `json:"schema_prefix"`
-	MigrationsTable     string        `json:"migrations_table"`
+	Driver          string        `json:"driver"`
+	DSN             string        `json:"dsn"`
+	MaxOpenConns    int           `json:"max_open_conns"`
+	MaxIdleConns    int           `json:"max_idle_conns"`
+	ConnMaxLifetime time.Duration `json:"conn_max_lifetime"`
+	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
+	SchemaPrefix    string        `json:"schema_prefix"`
+	MigrationsTable string        `json:"migrations_table"`
 }
 
 // ResolverConfig contains tenant resolution configuration
 type ResolverConfig struct {
-	Strategy         string   `json:"strategy"` // "subdomain", "path", "header"
-	Domain           string   `json:"domain"`
-	HeaderName       string   `json:"header_name"`
-	PathPrefix       string   `json:"path_prefix"`
+	Strategy          string   `json:"strategy"` // "subdomain", "path", "header"
+	Domain            string   `json:"domain"`
+	HeaderName        string   `json:"header_name"`
+	PathPrefix        string   `json:"path_prefix"`
 	ReservedSubdomain []string `json:"reserved_subdomains"`
 }
 
@@ -146,13 +146,13 @@ const (
 func DefaultConfig() Config {
 	return Config{
 		Database: DatabaseConfig{
-			Driver:              "postgres",
-			MaxOpenConns:        100,
-			MaxIdleConns:        50,
-			ConnMaxLifetime:     15 * time.Minute,
-			ConnMaxIdleTime:     5 * time.Minute,
-			SchemaPrefix:        "tenant_",
-			MigrationsTable:     "tenant_migrations",
+			Driver:          "postgres",
+			MaxOpenConns:    100,
+			MaxIdleConns:    50,
+			ConnMaxLifetime: 15 * time.Minute,
+			ConnMaxIdleTime: 5 * time.Minute,
+			SchemaPrefix:    "tenant_",
+			MigrationsTable: "tenant_migrations",
 		},
 		Resolver: ResolverConfig{
 			Strategy:          ResolverSubdomain,
@@ -204,5 +204,3 @@ func ValidatePlanType(planType string) bool {
 		return false
 	}
 }
-
-

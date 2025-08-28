@@ -15,14 +15,14 @@ import (
 func main() {
 	// Create configuration
 	config := multitenant.DefaultConfig()
-	
+
 	// Configure database connection
 	config.Database.DSN = "postgres://username:password@localhost:5432/multitenant_db?sslmode=disable"
-	
+
 	// Configure tenant resolver
 	config.Resolver.Strategy = multitenant.ResolverSubdomain
 	config.Resolver.Domain = "example.com"
-	
+
 	// Configure logging
 	config.Logger.Level = "info"
 	config.Logger.Format = "console"
@@ -77,7 +77,7 @@ func main() {
 	fmt.Println("  - http://acme.localhost:8080/api/info")
 	fmt.Println("  - http://globex.localhost:8080/api/info")
 	fmt.Println("  - http://localhost:8080/admin/tenants")
-	
+
 	log.Fatal(http.ListenAndServe(":8080", r))
 }
 
@@ -147,7 +147,7 @@ func getTenantInfo(c *gin.Context) {
 func getProjects(c *gin.Context) {
 	// In a real application, you'd query the tenant-specific database
 	// The middleware has already set the correct schema context
-	
+
 	c.JSON(http.StatusOK, gin.H{
 		"projects": []gin.H{
 			{"id": 1, "name": "Project Alpha", "status": "active"},
@@ -252,7 +252,7 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		c.JSON(http.StatusCreated, gin.H{
-			"tenant": tenant,
+			"tenant":  tenant,
 			"message": "Tenant created successfully. Use /admin/tenants/:id/provision to provision the schema.",
 		})
 	}
@@ -277,5 +277,3 @@ func provisionTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		})
 	}
 }
-
-

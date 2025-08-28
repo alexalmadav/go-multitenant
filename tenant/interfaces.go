@@ -134,5 +134,3 @@ func GetTenantDBFromContext(ctx context.Context) (*sql.DB, bool) {
 	db, ok := ctx.Value(ContextKeyTenantDB).(*sql.DB)
 	return db, ok
 }
-
-
