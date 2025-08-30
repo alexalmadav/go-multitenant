@@ -19,6 +19,9 @@ type SchemaManager struct {
 	schemaPrefix string
 }
 
+// Ensure SchemaManager implements tenant.SchemaManager interface
+var _ tenant.SchemaManager = (*SchemaManager)(nil)
+
 // NewSchemaManager creates a new schema manager
 func NewSchemaManager(db *sql.DB, logger *zap.Logger, schemaPrefix string) *SchemaManager {
 	if schemaPrefix == "" {

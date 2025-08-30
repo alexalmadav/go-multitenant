@@ -171,22 +171,31 @@ func createCustomConfig() multitenant.Config {
 }
 
 func demonstrateCustomLimits(mt *multitenant.MultiTenant) {
-	// Get the limit checker from the manager
-	limitChecker := mt.Manager.(*tenant.Manager).GetLimitChecker() // This would need to be exposed
+	// TODO: This functionality requires exposing the limit checker from the manager
+	// The Manager interface would need to include a GetLimitChecker() method
 
-	// Add a runtime custom limit
-	err := limitChecker.AddLimit("startup", "custom_api_endpoints", tenant.LimitTypeInt, 3)
-	if err != nil {
-		log.Printf("Failed to add custom limit: %v", err)
-	}
+	fmt.Println("Custom limits functionality demonstration (not yet implemented)")
+	fmt.Println("This would allow adding runtime limits like:")
+	fmt.Println("- Custom API endpoint limits for specific plans")
+	fmt.Println("- Feature toggles (beta features, etc.)")
+	fmt.Println("- Dynamic limit adjustments")
 
-	// Add a feature toggle
-	err = limitChecker.AddLimit("business", "beta_features", tenant.LimitTypeBool, true)
-	if err != nil {
-		log.Printf("Failed to add beta features limit: %v", err)
-	}
+	// Example of what this would look like once properly exposed:
+	/*
+		limitChecker := mt.Manager.GetLimitChecker() // This method would need to be added
 
-	fmt.Println("Added custom limits to existing plans")
+		// Add a runtime custom limit
+		err := limitChecker.AddLimit("startup", "custom_api_endpoints", tenant.LimitTypeInt, 3)
+		if err != nil {
+			log.Printf("Failed to add custom limit: %v", err)
+		}
+
+		// Add a feature toggle
+		err = limitChecker.AddLimit("business", "beta_features", tenant.LimitTypeBool, true)
+		if err != nil {
+			log.Printf("Failed to add beta features limit: %v", err)
+		}
+	*/
 }
 
 func createExampleTenants(mt *multitenant.MultiTenant) error {
