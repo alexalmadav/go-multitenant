@@ -57,7 +57,7 @@ func (m *MigrationManager) ApplyMigration(ctx context.Context, tenantID uuid.UUI
 
 	// Use the PostgreSQL function apply_tenant_migration
 	query := `SELECT apply_tenant_migration($1, $2, $3, $4, $5)`
-	
+
 	var rollbackSQL sql.NullString
 	if migration.RollbackSQL != nil {
 		rollbackSQL.String = *migration.RollbackSQL
@@ -95,7 +95,7 @@ func (m *MigrationManager) ApplyToAllTenants(ctx context.Context, migration *ten
 
 	// Use the PostgreSQL function apply_migration_to_all_tenants
 	query := `SELECT apply_migration_to_all_tenants($1, $2, $3, $4)`
-	
+
 	var rollbackSQL sql.NullString
 	if migration.RollbackSQL != nil {
 		rollbackSQL.String = *migration.RollbackSQL
@@ -110,7 +110,7 @@ func (m *MigrationManager) ApplyToAllTenants(ctx context.Context, migration *ten
 	)
 
 	if err != nil {
-		m.logger.Error("Bulk migration failed", 
+		m.logger.Error("Bulk migration failed",
 			zap.String("migration_version", migration.Version),
 			zap.Error(err))
 		return fmt.Errorf("bulk migration failed: %w", err)
@@ -142,7 +142,7 @@ func (m *MigrationManager) RollbackMigration(ctx context.Context, tenantID uuid.
 
 	// Use the PostgreSQL function rollback_tenant_migration
 	query := `SELECT rollback_tenant_migration($1, $2)`
-	
+
 	_, err = m.db.ExecContext(ctx, query, tenantID, version)
 	if err != nil {
 		m.logger.Error("Rollback failed",
@@ -208,7 +208,7 @@ func (m *MigrationManager) GetAppliedMigrations(ctx context.Context, tenantID uu
 // IsMigrationApplied checks if a migration is applied to a tenant
 func (m *MigrationManager) IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error) {
 	query := `SELECT is_tenant_migration_applied($1, $2)`
-	
+
 	var applied bool
 	err := m.db.QueryRowContext(ctx, query, tenantID, version).Scan(&applied)
 	if err != nil {
@@ -246,7 +246,7 @@ func (m *MigrationManager) LoadMigrationFromFile(version, name string) (*tenant.
 		rollbackSQL := string(downSQL)
 		migration.RollbackSQL = &rollbackSQL
 	} else {
-		m.logger.Debug("No rollback SQL file found", 
+		m.logger.Debug("No rollback SQL file found",
 			zap.String("file", downFile),
 			zap.String("version", version))
 	}
@@ -311,7 +311,7 @@ func (m *MigrationManager) ListMigrationFiles() ([]string, error) {
 // validateTenantSchema checks if tenant schema exists
 func (m *MigrationManager) validateTenantSchema(ctx context.Context, tenantID uuid.UUID) bool {
 	query := `SELECT validate_tenant_schema($1)`
-	
+
 	var exists bool
 	err := m.db.QueryRowContext(ctx, query, tenantID).Scan(&exists)
 	if err != nil {

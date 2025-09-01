@@ -189,15 +189,43 @@ func (fl FlexibleLimits) IsUnlimited(name string) bool {
 	return limit.IsUnlimited()
 }
 
+// Delete removes a limit by name
+func (fl FlexibleLimits) Delete(name string) {
+	delete(fl, name)
+}
+
+// Has checks if a limit exists
+func (fl FlexibleLimits) Has(name string) bool {
+	_, exists := fl[name]
+	return exists
+}
+
+// Keys returns all limit names
+func (fl FlexibleLimits) Keys() []string {
+	keys := make([]string, 0, len(fl))
+	for name := range fl {
+		keys = append(keys, name)
+	}
+	return keys
+}
+
+// Len returns the number of limits
+func (fl FlexibleLimits) Len() int {
+	return len(fl)
+}
+
 // LimitDefinition defines metadata for a limit type
 type LimitDefinition struct {
 	Name         string      `json:"name"`
 	DisplayName  string      `json:"display_name"`
 	Description  string      `json:"description"`
 	Type         LimitType   `json:"type"`
-	DefaultValue interface{} `json:"default_value"`
+	DefaultValue *LimitValue `json:"default_value"`
+	MinValue     *LimitValue `json:"min_value"`
+	MaxValue     *LimitValue `json:"max_value"`
 	Required     bool        `json:"required"`
 	Category     string      `json:"category"` // e.g., "usage", "features", "api", etc.
+	Tags         []string    `json:"tags"`
 }
 
 // LimitSchema defines available limit types for a system
@@ -217,10 +245,15 @@ func (ls *LimitSchema) AddDefinition(def *LimitDefinition) {
 	ls.Definitions[def.Name] = def
 }
 
-// GetDefinition retrieves a limit definition by name
+// GetDefinition gets a limit definition by name
 func (ls *LimitSchema) GetDefinition(name string) (*LimitDefinition, bool) {
 	def, exists := ls.Definitions[name]
 	return def, exists
+}
+
+// GetAllDefinitions returns all limit definitions
+func (ls *LimitSchema) GetAllDefinitions() map[string]*LimitDefinition {
+	return ls.Definitions
 }
 
 // ValidateLimits validates a set of limits against the schema
@@ -310,7 +343,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Maximum Users",
 		Description:  "Maximum number of users allowed in the tenant",
 		Type:         LimitTypeInt,
-		DefaultValue: 5,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 5},
 		Required:     true,
 		Category:     "usage",
 	})
@@ -320,7 +353,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Maximum Projects",
 		Description:  "Maximum number of projects allowed in the tenant",
 		Type:         LimitTypeInt,
-		DefaultValue: 10,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 10},
 		Required:     true,
 		Category:     "usage",
 	})
@@ -330,7 +363,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Maximum Storage (GB)",
 		Description:  "Maximum storage allowed in gigabytes",
 		Type:         LimitTypeInt,
-		DefaultValue: 1,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 1},
 		Required:     true,
 		Category:     "usage",
 	})
@@ -340,7 +373,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Maximum File Size (MB)",
 		Description:  "Maximum size for uploaded files in megabytes",
 		Type:         LimitTypeInt,
-		DefaultValue: 10,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 10},
 		Required:     false,
 		Category:     "usage",
 	})
@@ -351,7 +384,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "API Calls per Month",
 		Description:  "Maximum number of API calls allowed per month",
 		Type:         LimitTypeInt,
-		DefaultValue: 10000,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 10000},
 		Required:     false,
 		Category:     "api",
 	})
@@ -361,7 +394,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "API Rate per Minute",
 		Description:  "Maximum number of API calls allowed per minute",
 		Type:         LimitTypeInt,
-		DefaultValue: 100,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 100},
 		Required:     false,
 		Category:     "api",
 	})
@@ -371,7 +404,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Maximum Webhook Endpoints",
 		Description:  "Maximum number of webhook endpoints that can be configured",
 		Type:         LimitTypeInt,
-		DefaultValue: 5,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 5},
 		Required:     false,
 		Category:     "api",
 	})
@@ -382,7 +415,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Advanced Features",
 		Description:  "Whether advanced features are enabled",
 		Type:         LimitTypeBool,
-		DefaultValue: false,
+		DefaultValue: &LimitValue{Type: LimitTypeBool, Value: false},
 		Required:     false,
 		Category:     "features",
 	})
@@ -392,7 +425,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Custom Integrations",
 		Description:  "Whether custom integrations are allowed",
 		Type:         LimitTypeBool,
-		DefaultValue: false,
+		DefaultValue: &LimitValue{Type: LimitTypeBool, Value: false},
 		Required:     false,
 		Category:     "features",
 	})
@@ -402,7 +435,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Priority Support",
 		Description:  "Whether priority support is included",
 		Type:         LimitTypeBool,
-		DefaultValue: false,
+		DefaultValue: &LimitValue{Type: LimitTypeBool, Value: false},
 		Required:     false,
 		Category:     "support",
 	})
@@ -412,7 +445,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Dedicated Support",
 		Description:  "Whether dedicated support representative is assigned",
 		Type:         LimitTypeBool,
-		DefaultValue: false,
+		DefaultValue: &LimitValue{Type: LimitTypeBool, Value: false},
 		Required:     false,
 		Category:     "support",
 	})
@@ -423,7 +456,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Backup Retention (Days)",
 		Description:  "Number of days to retain backups",
 		Type:         LimitTypeInt,
-		DefaultValue: 7,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 7},
 		Required:     false,
 		Category:     "data",
 	})
@@ -433,7 +466,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Session Timeout",
 		Description:  "Maximum session duration before timeout",
 		Type:         LimitTypeDuration,
-		DefaultValue: "24h",
+		DefaultValue: &LimitValue{Type: LimitTypeDuration, Value: "24h"},
 		Required:     false,
 		Category:     "security",
 	})
@@ -444,7 +477,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Custom Domain",
 		Description:  "Custom domain allowed for this tenant",
 		Type:         LimitTypeString,
-		DefaultValue: "",
+		DefaultValue: &LimitValue{Type: LimitTypeString, Value: ""},
 		Required:     false,
 		Category:     "branding",
 	})
@@ -454,7 +487,7 @@ func DefaultLimitSchema() *LimitSchema {
 		DisplayName:  "Export Formats",
 		Description:  "Comma-separated list of allowed export formats",
 		Type:         LimitTypeString,
-		DefaultValue: "csv,json",
+		DefaultValue: &LimitValue{Type: LimitTypeString, Value: "csv,json"},
 		Required:     false,
 		Category:     "features",
 	})

@@ -80,13 +80,17 @@ func New(config tenant.Config) (*MultiTenant, error) {
 
 // Close closes all resources
 func (mt *MultiTenant) Close() error {
-	if err := mt.Manager.Close(); err != nil {
-		mt.logger.Error("Failed to close manager", zap.Error(err))
+	if mt.Manager != nil {
+		if err := mt.Manager.Close(); err != nil {
+			mt.logger.Error("Failed to close manager", zap.Error(err))
+		}
 	}
 
-	if err := mt.db.Close(); err != nil {
-		mt.logger.Error("Failed to close database", zap.Error(err))
-		return err
+	if mt.db != nil {
+		if err := mt.db.Close(); err != nil {
+			mt.logger.Error("Failed to close database", zap.Error(err))
+			return err
+		}
 	}
 
 	return nil
