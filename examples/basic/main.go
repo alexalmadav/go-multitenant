@@ -18,6 +18,7 @@ func main() {
 
 	// Configure database connection
 	config.Database.DSN = "postgres://username:password@localhost:5432/multitenant_db?sslmode=disable"
+	config.Database.MigrationsDir = "./migrations/tenant_migrations"
 
 	// Configure tenant resolver
 	config.Resolver.Strategy = multitenant.ResolverSubdomain

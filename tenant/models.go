@@ -75,6 +75,7 @@ type DatabaseConfig struct {
 	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
 	SchemaPrefix    string        `json:"schema_prefix"`
 	MigrationsTable string        `json:"migrations_table"`
+	MigrationsDir   string        `json:"migrations_dir"`
 }
 
 // ResolverConfig contains tenant resolution configuration
@@ -184,6 +185,7 @@ func DefaultConfig() Config {
 			ConnMaxIdleTime: 5 * time.Minute,
 			SchemaPrefix:    "tenant_",
 			MigrationsTable: "tenant_migrations",
+			MigrationsDir:   "", // Applications should set this
 		},
 		Resolver: ResolverConfig{
 			Strategy:          ResolverSubdomain,

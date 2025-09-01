@@ -11,7 +11,6 @@ import (
 	"github.com/alexalmadav/go-multitenant/database/postgres"
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/alexalmadav/go-multitenant/tenant"
-	"github.com/google/uuid"
 	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 )
@@ -50,8 +49,9 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Create schema manager
 	schemaManager := database.NewSchemaManager(db, logger, config.Database.SchemaPrefix)
 
-	// Create migration manager (placeholder for now)
-	migrationMgr := newMigrationManager(db, logger)
+	// Create migration manager using PostgreSQL functions
+	// Note: Applications should specify their own migrations directory path
+	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir)
 
 	// Create limit checker
 	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
@@ -157,44 +157,6 @@ func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
 }
 
 // Helper functions for creating components
-
-// migrationManager is a placeholder implementation of tenant.MigrationManager
-type migrationManager struct {
-	db     *sql.DB
-	logger *zap.Logger
-}
-
-func newMigrationManager(db *sql.DB, logger *zap.Logger) tenant.MigrationManager {
-	return &migrationManager{
-		db:     db,
-		logger: logger.Named("migration"),
-	}
-}
-
-func (m *migrationManager) ApplyMigration(ctx context.Context, tenantID uuid.UUID, migration *tenant.Migration) error {
-	// TODO: Implement migration application
-	return fmt.Errorf("not implemented")
-}
-
-func (m *migrationManager) RollbackMigration(ctx context.Context, tenantID uuid.UUID, version string) error {
-	// TODO: Implement migration rollback
-	return fmt.Errorf("not implemented")
-}
-
-func (m *migrationManager) ApplyToAllTenants(ctx context.Context, migration *tenant.Migration) error {
-	// TODO: Implement bulk migration
-	return fmt.Errorf("not implemented")
-}
-
-func (m *migrationManager) GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*tenant.Migration, error) {
-	// TODO: Implement migration listing
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (m *migrationManager) IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error) {
-	// TODO: Implement migration check
-	return false, fmt.Errorf("not implemented")
-}
 
 // Re-export key types and functions for convenience
 type (

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/alexalmadav/go-multitenant"
@@ -20,6 +19,7 @@ func main() {
 
 	// Configure database
 	config.Database.DSN = "postgres://username:password@localhost:5432/multitenant_billing_db?sslmode=disable"
+	config.Database.MigrationsDir = "./migrations/tenant_migrations"
 
 	// Configure resolver
 	config.Resolver.Strategy = multitenant.ResolverSubdomain
