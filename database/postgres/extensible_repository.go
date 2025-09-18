@@ -202,7 +202,7 @@ func (r *ExtensibleRepository) ListExtended(ctx context.Context, page, perPage i
 
 	offset := (page - 1) * perPage
 
-	// Get total count
+	// Get total count (exclude cancelled tenants)
 	var total int
 	countQuery := `SELECT COUNT(*) FROM tenants WHERE status != $1`
 	err := r.db.QueryRowContext(ctx, countQuery, tenant.StatusCancelled).Scan(&total)
@@ -210,7 +210,7 @@ func (r *ExtensibleRepository) ListExtended(ctx context.Context, page, perPage i
 		return nil, 0, fmt.Errorf("failed to get tenant count: %w", err)
 	}
 
-	// Get tenants
+	// Get tenants (exclude cancelled tenants)
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, 
 		       COALESCE(metadata, '{}') as metadata, created_at, updated_at
@@ -368,7 +368,9 @@ func (r *ExtensibleRepository) FindByMetadata(ctx context.Context, key string, v
 		ORDER BY created_at DESC
 	`
 
-	rows, err := r.db.QueryContext(ctx, query, key, fmt.Sprintf("%v", value), tenant.StatusCancelled)
+	// Convert value to string for JSONB text comparison
+	valueStr := fmt.Sprintf("%v", value)
+	rows, err := r.db.QueryContext(ctx, query, key, valueStr, tenant.StatusCancelled)
 	if err != nil {
 		r.logger.Error("Failed to find tenants by metadata",
 			zap.String("key", key),
