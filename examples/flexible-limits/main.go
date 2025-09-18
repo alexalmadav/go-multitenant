@@ -74,7 +74,7 @@ func createCustomConfig() multitenant.Config {
 		DisplayName:  "Video Processing Minutes",
 		Description:  "Monthly allowance for video processing",
 		Type:         tenant.LimitTypeInt,
-		DefaultValue: 60,
+		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 60},
 		Required:     false,
 		Category:     "media",
 	})
@@ -84,7 +84,7 @@ func createCustomConfig() multitenant.Config {
 		DisplayName:  "AI Model API Calls",
 		Description:  "Monthly AI model API call allowance",
 		Type:         tenant.LimitTypeInt,
-		DefaultValue: 1000,
+		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 1000},
 		Required:     false,
 		Category:     "ai",
 	})
@@ -94,7 +94,7 @@ func createCustomConfig() multitenant.Config {
 		DisplayName:  "Custom Branding",
 		Description:  "Allow custom branding and white-labeling",
 		Type:         tenant.LimitTypeBool,
-		DefaultValue: false,
+		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeBool, Value: false},
 		Required:     false,
 		Category:     "branding",
 	})
@@ -104,7 +104,7 @@ func createCustomConfig() multitenant.Config {
 		DisplayName:  "Data Retention (Years)",
 		Description:  "How long data is retained in years",
 		Type:         tenant.LimitTypeFloat,
-		DefaultValue: 1.0,
+		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeFloat, Value: 1.0},
 		Required:     false,
 		Category:     "compliance",
 	})
@@ -114,7 +114,7 @@ func createCustomConfig() multitenant.Config {
 		DisplayName:  "Concurrent Connections",
 		Description:  "Maximum concurrent WebSocket connections",
 		Type:         tenant.LimitTypeInt,
-		DefaultValue: 10,
+		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 10},
 		Required:     false,
 		Category:     "performance",
 	})
