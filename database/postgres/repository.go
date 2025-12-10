@@ -30,7 +30,7 @@ func NewRepository(db *sql.DB, logger *zap.Logger) *Repository {
 // Create creates a new tenant
 func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 	query := `
-		INSERT INTO tenants (id, name, subdomain, plan_type, status, schema_name, created_at, updated_at)
+		INSERT INTO public.tenants (id, name, subdomain, plan_type, status, schema_name, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
@@ -68,7 +68,7 @@ func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE id = $1
 	`
 
@@ -101,7 +101,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant,
 func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*tenant.Tenant, error) {
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE subdomain = $1
 	`
 
@@ -133,7 +133,7 @@ func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*ten
 // Update updates a tenant
 func (r *Repository) Update(ctx context.Context, t *tenant.Tenant) error {
 	query := `
-		UPDATE tenants 
+		UPDATE public.tenants 
 		SET name = $2, subdomain = $3, plan_type = $4, status = $5, updated_at = $6
 		WHERE id = $1
 	`
@@ -175,7 +175,7 @@ func (r *Repository) Update(ctx context.Context, t *tenant.Tenant) error {
 // Delete soft deletes a tenant (sets status to cancelled)
 func (r *Repository) Delete(ctx context.Context, id uuid.UUID) error {
 	query := `
-		UPDATE tenants 
+		UPDATE public.tenants 
 		SET status = $2, updated_at = $3
 		WHERE id = $1
 	`
@@ -216,7 +216,7 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 
 	// Get total count
 	var total int
-	countQuery := `SELECT COUNT(*) FROM tenants WHERE status != $1`
+	countQuery := `SELECT COUNT(*) FROM public.tenants WHERE status != $1`
 	err := r.db.QueryRowContext(ctx, countQuery, tenant.StatusCancelled).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get tenant count: %w", err)
@@ -225,7 +225,7 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 	// Get tenants
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE status != $1
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
@@ -302,7 +302,7 @@ func (r *Repository) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.
 // CreateMasterTables creates the master tables needed for tenant management
 func (r *Repository) CreateMasterTables(ctx context.Context) error {
 	tables := []string{
-		`CREATE TABLE IF NOT EXISTS tenants (
+		`CREATE TABLE IF NOT EXISTS public.tenants (
 			id UUID PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
 			subdomain VARCHAR(255) UNIQUE NOT NULL,
@@ -315,7 +315,7 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 			CONSTRAINT chk_status CHECK (status IN ('active', 'suspended', 'pending', 'cancelled'))
 		)`,
 
-		`CREATE TABLE IF NOT EXISTS tenant_migrations (
+		`CREATE TABLE IF NOT EXISTS public.tenant_migrations (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 			tenant_id UUID NOT NULL,
 			version VARCHAR(50) NOT NULL,
@@ -323,16 +323,16 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 			applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			rollback_sql TEXT,
 			checksum VARCHAR(64),
-			FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+			FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE,
 			UNIQUE(tenant_id, version)
 		)`,
 	}
 
 	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_tenants_subdomain ON tenants(subdomain)",
-		"CREATE INDEX IF NOT EXISTS idx_tenants_status ON tenants(status)",
-		"CREATE INDEX IF NOT EXISTS idx_tenant_migrations_tenant_id ON tenant_migrations(tenant_id)",
-		"CREATE INDEX IF NOT EXISTS idx_tenant_migrations_version ON tenant_migrations(version)",
+		"CREATE INDEX IF NOT EXISTS idx_tenants_subdomain ON public.tenants(subdomain)",
+		"CREATE INDEX IF NOT EXISTS idx_tenants_status ON public.tenants(status)",
+		"CREATE INDEX IF NOT EXISTS idx_tenant_migrations_tenant_id ON public.tenant_migrations(tenant_id)",
+		"CREATE INDEX IF NOT EXISTS idx_tenant_migrations_version ON public.tenant_migrations(version)",
 	}
 
 	// Create tables

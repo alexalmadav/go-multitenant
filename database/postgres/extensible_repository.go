@@ -27,7 +27,7 @@ func NewExtensibleRepository(db *sql.DB, logger *zap.Logger) *ExtensibleReposito
 // CreateExtended creates a new tenant with metadata
 func (r *ExtensibleRepository) CreateExtended(ctx context.Context, t *tenant.ExtensibleTenant) error {
 	query := `
-		INSERT INTO tenants (id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at)
+		INSERT INTO public.tenants (id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 
@@ -73,7 +73,7 @@ func (r *ExtensibleRepository) GetExtendedByID(ctx context.Context, id uuid.UUID
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, 
 		       COALESCE(metadata, '{}') as metadata, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE id = $1
 	`
 
@@ -110,7 +110,7 @@ func (r *ExtensibleRepository) GetExtendedBySubdomain(ctx context.Context, subdo
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, 
 		       COALESCE(metadata, '{}') as metadata, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE subdomain = $1
 	`
 
@@ -145,7 +145,7 @@ func (r *ExtensibleRepository) GetExtendedBySubdomain(ctx context.Context, subdo
 // UpdateExtended updates an extended tenant
 func (r *ExtensibleRepository) UpdateExtended(ctx context.Context, t *tenant.ExtensibleTenant) error {
 	query := `
-		UPDATE tenants 
+		UPDATE public.tenants 
 		SET name = $2, subdomain = $3, plan_type = $4, status = $5, metadata = $6, updated_at = $7
 		WHERE id = $1
 	`
@@ -204,7 +204,7 @@ func (r *ExtensibleRepository) ListExtended(ctx context.Context, page, perPage i
 
 	// Get total count (exclude cancelled tenants)
 	var total int
-	countQuery := `SELECT COUNT(*) FROM tenants WHERE status != $1`
+	countQuery := `SELECT COUNT(*) FROM public.tenants WHERE status != $1`
 	err := r.db.QueryRowContext(ctx, countQuery, tenant.StatusCancelled).Scan(&total)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to get tenant count: %w", err)
@@ -214,7 +214,7 @@ func (r *ExtensibleRepository) ListExtended(ctx context.Context, page, perPage i
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, 
 		       COALESCE(metadata, '{}') as metadata, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE status != $1
 		ORDER BY created_at DESC
 		LIMIT $2 OFFSET $3
@@ -256,7 +256,7 @@ func (r *ExtensibleRepository) ListExtended(ctx context.Context, page, perPage i
 // UpdateMetadata updates only the metadata field for a tenant
 func (r *ExtensibleRepository) UpdateMetadata(ctx context.Context, tenantID uuid.UUID, metadata tenant.TenantMetadata) error {
 	query := `
-		UPDATE tenants 
+		UPDATE public.tenants 
 		SET metadata = $2, updated_at = $3
 		WHERE id = $1
 	`
@@ -283,7 +283,7 @@ func (r *ExtensibleRepository) UpdateMetadata(ctx context.Context, tenantID uuid
 
 // GetMetadata retrieves only the metadata for a tenant
 func (r *ExtensibleRepository) GetMetadata(ctx context.Context, tenantID uuid.UUID) (tenant.TenantMetadata, error) {
-	query := `SELECT COALESCE(metadata, '{}') FROM tenants WHERE id = $1`
+	query := `SELECT COALESCE(metadata, '{}') FROM public.tenants WHERE id = $1`
 
 	metadata := make(tenant.TenantMetadata)
 	err := r.db.QueryRowContext(ctx, query, tenantID).Scan(&metadata)
@@ -300,7 +300,7 @@ func (r *ExtensibleRepository) GetMetadata(ctx context.Context, tenantID uuid.UU
 // UpdateMetadataField updates a single metadata field
 func (r *ExtensibleRepository) UpdateMetadataField(ctx context.Context, tenantID uuid.UUID, key string, value interface{}) error {
 	query := `
-		UPDATE tenants 
+		UPDATE public.tenants 
 		SET metadata = COALESCE(metadata, '{}') || jsonb_build_object($2, $3),
 		    updated_at = $4
 		WHERE id = $1
@@ -330,7 +330,7 @@ func (r *ExtensibleRepository) UpdateMetadataField(ctx context.Context, tenantID
 // RemoveMetadataField removes a single metadata field
 func (r *ExtensibleRepository) RemoveMetadataField(ctx context.Context, tenantID uuid.UUID, key string) error {
 	query := `
-		UPDATE tenants 
+		UPDATE public.tenants 
 		SET metadata = COALESCE(metadata, '{}') - $2,
 		    updated_at = $3
 		WHERE id = $1
@@ -362,7 +362,7 @@ func (r *ExtensibleRepository) FindByMetadata(ctx context.Context, key string, v
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, 
 		       COALESCE(metadata, '{}') as metadata, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE metadata ->> $1 = $2
 		AND status != $3
 		ORDER BY created_at DESC
@@ -416,7 +416,7 @@ func (r *ExtensibleRepository) FindByMetadataKeys(ctx context.Context, keys []st
 	query := `
 		SELECT id, name, subdomain, plan_type, status, schema_name, 
 		       COALESCE(metadata, '{}') as metadata, created_at, updated_at
-		FROM tenants
+		FROM public.tenants
 		WHERE status != $1 AND (
 	`
 
@@ -474,7 +474,7 @@ func (r *ExtensibleRepository) CreateMasterTablesExtended(ctx context.Context) e
 
 	// Add metadata column if it doesn't exist
 	alterQuery := `
-		ALTER TABLE tenants 
+		ALTER TABLE public.tenants 
 		ADD COLUMN IF NOT EXISTS metadata JSONB DEFAULT '{}'
 	`
 
@@ -484,8 +484,8 @@ func (r *ExtensibleRepository) CreateMasterTablesExtended(ctx context.Context) e
 
 	// Create indexes for metadata queries
 	indexes := []string{
-		"CREATE INDEX IF NOT EXISTS idx_tenants_metadata_gin ON tenants USING GIN (metadata)",
-		"CREATE INDEX IF NOT EXISTS idx_tenants_metadata_stripe_customer ON tenants USING BTREE ((metadata->>'stripe_customer_id')) WHERE metadata ? 'stripe_customer_id'",
+		"CREATE INDEX IF NOT EXISTS idx_tenants_metadata_gin ON public.tenants USING GIN (metadata)",
+		"CREATE INDEX IF NOT EXISTS idx_tenants_metadata_stripe_customer ON public.tenants USING BTREE ((metadata->>'stripe_customer_id')) WHERE metadata ? 'stripe_customer_id'",
 	}
 
 	for _, indexSQL := range indexes {
