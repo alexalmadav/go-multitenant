@@ -146,7 +146,7 @@ func TestSchemaManager_createTenantTables(t *testing.T) {
 	sm := NewSchemaManager(nil, logger, "tenant_")
 
 	// Test with nil transaction should fail
-	err := sm.createTenantTables(context.Background(), nil)
+	err := sm.createTenantTables(context.Background(), nil, `"test_schema"`)
 	if err == nil {
 		t.Error("createTenantTables() should error with nil transaction")
 	}

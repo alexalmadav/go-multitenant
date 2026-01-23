@@ -29,7 +29,30 @@ type Manager interface {
 	GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error)
 
 	// Database operations
+	//
+	// Deprecated: GetTenantDB is unsafe with connection pools. Use GetTenantConn or WithTenantTx instead.
+	// The search_path set on one connection may not apply to subsequent queries from the pool.
 	GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error)
+
+	// GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
+	// IMPORTANT: The caller MUST close the connection when done to return it to the pool.
+	// Example:
+	//   conn, err := manager.GetTenantConn(ctx, tenantID)
+	//   if err != nil { return err }
+	//   defer conn.Close()
+	//   // use conn for queries...
+	GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, error)
+
+	// WithTenantTx executes a function within a transaction with the tenant's search_path set.
+	// This is the safest way to execute tenant-scoped queries.
+	// The transaction is automatically committed if fn returns nil, or rolled back on error.
+	// Example:
+	//   err := manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+	//       _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", name)
+	//       return err
+	//   })
+	WithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(tx *sql.Tx) error) error
+
 	WithTenantContext(ctx context.Context, tenantID uuid.UUID) context.Context
 
 	// Close resources
@@ -106,8 +129,10 @@ const (
 	ContextKeyTenant ContextKey = "tenant"
 	// ContextKeyTenantID is the context key for tenant ID
 	ContextKeyTenantID ContextKey = "tenant_id"
-	// ContextKeyTenantDB is the context key for tenant database connection
+	// ContextKeyTenantDB is the context key for tenant database connection (deprecated)
 	ContextKeyTenantDB ContextKey = "tenant_db"
+	// ContextKeyTenantConn is the context key for dedicated tenant database connection
+	ContextKeyTenantConn ContextKey = "tenant_conn"
 )
 
 // GetTenantFromContext extracts tenant context from a context
@@ -122,8 +147,17 @@ func GetTenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	return tenantID, ok
 }
 
-// GetTenantDBFromContext extracts tenant database connection from a context
+// GetTenantDBFromContext extracts tenant database connection from a context.
+//
+// Deprecated: Use GetTenantConnFromContext instead for safe tenant-scoped queries.
 func GetTenantDBFromContext(ctx context.Context) (*sql.DB, bool) {
 	db, ok := ctx.Value(ContextKeyTenantDB).(*sql.DB)
 	return db, ok
+}
+
+// GetTenantConnFromContext extracts the dedicated tenant database connection from context.
+// This connection has the tenant's search_path already set and is safe for tenant-scoped queries.
+func GetTenantConnFromContext(ctx context.Context) (*sql.Conn, bool) {
+	conn, ok := ctx.Value(ContextKeyTenantConn).(*sql.Conn)
+	return conn, ok
 }
