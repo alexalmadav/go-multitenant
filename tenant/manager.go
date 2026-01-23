@@ -238,15 +238,86 @@ func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, err
 	return m.repository.GetStats(ctx, tenantID)
 }
 
-// GetTenantDB returns a database connection with tenant context set
+// GetTenantDB returns a database connection with tenant context set.
+//
+// Deprecated: This method is unsafe with connection pools. The search_path is set on
+// one connection, but subsequent queries may use different connections from the pool.
+// Use GetTenantConn or WithTenantTx instead for safe tenant-scoped queries.
 func (m *manager) GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
-	// For now, return the main DB with search path set
-	// In a production system, you might want separate connection pools per tenant
+	m.logger.Warn("GetTenantDB is deprecated and unsafe with connection pools. Use GetTenantConn or WithTenantTx instead.",
+		zap.String("tenant_id", tenantID.String()))
+
+	// This is fundamentally unsafe but kept for backward compatibility
 	if err := m.schemaManager.SetSearchPath(m.db, tenantID); err != nil {
 		return nil, fmt.Errorf("failed to set tenant context: %w", err)
 	}
 
 	return m.db, nil
+}
+
+// GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
+// The caller MUST close the connection when done to return it to the pool.
+func (m *manager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, error) {
+	// Get a dedicated connection from the pool
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire connection: %w", err)
+	}
+
+	// Set search_path on this specific connection using PostgreSQL identifier quoting
+	schemaName := m.schemaManager.GetSchemaName(tenantID)
+	quotedSchema := fmt.Sprintf(`"%s"`, schemaName)
+	query := fmt.Sprintf("SET search_path TO %s, public", quotedSchema)
+	if _, err := conn.ExecContext(ctx, query); err != nil {
+		conn.Close() // Release connection on error
+		return nil, fmt.Errorf("failed to set search path: %w", err)
+	}
+
+	m.logger.Debug("Acquired tenant connection",
+		zap.String("tenant_id", tenantID.String()),
+		zap.String("schema", schemaName))
+
+	return conn, nil
+}
+
+// WithTenantTx executes a function within a transaction with the tenant's search_path set.
+// This is the safest way to execute tenant-scoped queries.
+func (m *manager) WithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(tx *sql.Tx) error) error {
+	// Get a dedicated connection
+	conn, err := m.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	// Start transaction
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	// Set search_path within the transaction using SET LOCAL (scoped to transaction)
+	// Using PostgreSQL identifier quoting for the schema name
+	schemaName := m.schemaManager.GetSchemaName(tenantID)
+	quotedSchema := fmt.Sprintf(`"%s"`, schemaName)
+	query := fmt.Sprintf("SET LOCAL search_path TO %s, public", quotedSchema)
+	if _, err := tx.ExecContext(ctx, query); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("failed to set search path: %w", err)
+	}
+
+	// Execute the user function
+	if err := fn(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// Commit transaction
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	return nil
 }
 
 // WithTenantContext adds tenant information to the context

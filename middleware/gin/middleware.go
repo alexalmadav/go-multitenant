@@ -1,6 +1,7 @@
 package gin
 
 import (
+	"database/sql"
 	"net/http"
 	"strings"
 
@@ -290,7 +291,9 @@ func (m *Middleware) LogAccess() gin.HandlerFunc {
 	}
 }
 
-// SetTenantDB is middleware that sets up tenant-specific database connection
+// SetTenantDB is middleware that sets up tenant-specific database connection.
+// It acquires a dedicated connection with the tenant's search_path set and ensures
+// proper cleanup when the request completes.
 func (m *Middleware) SetTenantDB() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tenantCtx, exists := GetTenantFromContext(c)
@@ -299,10 +302,10 @@ func (m *Middleware) SetTenantDB() gin.HandlerFunc {
 			return
 		}
 
-		// Get tenant-specific database connection
-		db, err := m.manager.GetTenantDB(c.Request.Context(), tenantCtx.TenantID)
+		// Get a dedicated tenant-specific database connection
+		conn, err := m.manager.GetTenantConn(c.Request.Context(), tenantCtx.TenantID)
 		if err != nil {
-			m.logger.Error("Failed to get tenant database",
+			m.logger.Error("Failed to get tenant database connection",
 				zap.String("tenant_id", tenantCtx.TenantID.String()),
 				zap.Error(err))
 
@@ -314,8 +317,17 @@ func (m *Middleware) SetTenantDB() gin.HandlerFunc {
 			return
 		}
 
+		// Ensure connection is released when request completes
+		defer func() {
+			if err := conn.Close(); err != nil {
+				m.logger.Error("Failed to close tenant database connection",
+					zap.String("tenant_id", tenantCtx.TenantID.String()),
+					zap.Error(err))
+			}
+		}()
+
 		// Set database connection in context
-		c.Set("tenant_db", db)
+		c.Set("tenant_conn", conn)
 		c.Next()
 	}
 }
@@ -353,6 +365,20 @@ func GetTenantLimitsFromContext(c *gin.Context) (*tenant.Limits, bool) {
 
 	l, ok := limits.(*tenant.Limits)
 	return l, ok
+}
+
+// GetTenantConnFromContext extracts tenant database connection from Gin context.
+// The connection has the tenant's search_path already set and is safe to use
+// for tenant-scoped queries. Do NOT close this connection manually - it will
+// be closed automatically when the request completes.
+func GetTenantConnFromContext(c *gin.Context) (*sql.Conn, bool) {
+	conn, exists := c.Get("tenant_conn")
+	if !exists {
+		return nil, false
+	}
+
+	tc, ok := conn.(*sql.Conn)
+	return tc, ok
 }
 
 // shouldSkipPath checks if a path should skip tenant resolution
