@@ -265,8 +265,8 @@ func TestReExportedConstants(t *testing.T) {
 func TestReExportedFunctions(t *testing.T) {
 	// Test DefaultConfig
 	config := DefaultConfig()
-	if config.Database.Driver != "postgres" {
-		t.Errorf("DefaultConfig().Database.Driver = %v, want postgres", config.Database.Driver)
+	if config.Database.Driver != "pgx" {
+		t.Errorf("DefaultConfig().Database.Driver = %v, want pgx", config.Database.Driver)
 	}
 
 	// Test context helper functions

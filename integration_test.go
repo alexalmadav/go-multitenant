@@ -9,7 +9,8 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 // Integration tests require a PostgreSQL database
@@ -30,10 +31,13 @@ func setupTestDatabase(t *testing.T) *sql.DB {
 	}
 
 	dbURL := getTestDatabaseURL()
-	db, err := sql.Open("postgres", dbURL)
+	connConfig, err := pgx.ParseConfig(dbURL)
 	if err != nil {
-		t.Skipf("Skipping integration test - cannot connect to database: %v", err)
+		t.Skipf("Skipping integration test - cannot parse database URL: %v", err)
 	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+
+	db := stdlib.OpenDB(*connConfig)
 
 	// Test connection
 	if err := db.Ping(); err != nil {

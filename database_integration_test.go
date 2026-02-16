@@ -12,7 +12,8 @@ import (
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -81,14 +82,26 @@ func newTestDB(t *testing.T) *testDB {
 		t.Skip("Skipping database integration test in short mode")
 	}
 
+	// openPgxDB opens a *sql.DB using pgx with simple protocol mode
+	openPgxDB := func(dsn string) (*sql.DB, error) {
+		connConfig, err := pgx.ParseConfig(dsn)
+		if err != nil {
+			return nil, err
+		}
+		connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+		db := stdlib.OpenDB(*connConfig)
+		if err := db.Ping(); err != nil {
+			db.Close()
+			return nil, err
+		}
+		return db, nil
+	}
+
 	// Check if we should use an external database
 	if dbURL := os.Getenv("TEST_DATABASE_URL"); dbURL != "" {
-		db, err := sql.Open("postgres", dbURL)
+		db, err := openPgxDB(dbURL)
 		if err != nil {
 			t.Fatalf("Failed to connect to external database: %v", err)
-		}
-		if err := db.Ping(); err != nil {
-			t.Fatalf("Failed to ping external database: %v", err)
 		}
 		return &testDB{
 			db:     db,
@@ -99,17 +112,14 @@ func newTestDB(t *testing.T) *testDB {
 
 	// Try default local PostgreSQL first
 	defaultURL := "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
-	db, err := sql.Open("postgres", defaultURL)
+	db, err := openPgxDB(defaultURL)
 	if err == nil {
-		if err := db.Ping(); err == nil {
-			t.Log("Using local PostgreSQL database")
-			return &testDB{
-				db:     db,
-				logger: zaptest.NewLogger(t),
-				t:      t,
-			}
+		t.Log("Using local PostgreSQL database")
+		return &testDB{
+			db:     db,
+			logger: zaptest.NewLogger(t),
+			t:      t,
 		}
-		db.Close()
 	}
 
 	// Use testcontainers as fallback
@@ -119,15 +129,10 @@ func newTestDB(t *testing.T) *testDB {
 		t.Skipf("Skipping integration test - no database available. Set TEST_DATABASE_URL or ensure Docker is running: %v", err)
 	}
 
-	db, err = sql.Open("postgres", container.ConnectionString)
+	db, err = openPgxDB(container.ConnectionString)
 	if err != nil {
 		container.Terminate(ctx)
 		t.Fatalf("Failed to connect to container database: %v", err)
-	}
-
-	if err := db.Ping(); err != nil {
-		container.Terminate(ctx)
-		t.Fatalf("Failed to ping container database: %v", err)
 	}
 
 	return &testDB{

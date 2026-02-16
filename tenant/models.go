@@ -178,7 +178,7 @@ func DefaultConfig() Config {
 
 	return Config{
 		Database: DatabaseConfig{
-			Driver:          "postgres",
+			Driver:          "pgx",
 			MaxOpenConns:    100,
 			MaxIdleConns:    50,
 			ConnMaxLifetime: 15 * time.Minute,

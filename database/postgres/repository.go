@@ -9,7 +9,6 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
 	"go.uber.org/zap"
 )
 
