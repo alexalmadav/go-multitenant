@@ -433,32 +433,34 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 		}
 	}
 
-	// Get tenant-specific database connections
-	db1, err := mt.Manager.GetTenantDB(ctx, tenant1ID)
+	// Get tenant-specific connections (using safe GetTenantConn, not deprecated GetTenantDB)
+	conn1, err := mt.Manager.GetTenantConn(ctx, tenant1ID)
 	if err != nil {
-		t.Fatalf("GetTenantDB for tenant1 failed: %v", err)
+		t.Fatalf("GetTenantConn for tenant1 failed: %v", err)
 	}
+	defer conn1.Close()
 
-	db2, err := mt.Manager.GetTenantDB(ctx, tenant2ID)
+	conn2, err := mt.Manager.GetTenantConn(ctx, tenant2ID)
 	if err != nil {
-		t.Fatalf("GetTenantDB for tenant2 failed: %v", err)
+		t.Fatalf("GetTenantConn for tenant2 failed: %v", err)
 	}
+	defer conn2.Close()
 
 	// Insert data into tenant1's projects table
-	_, err = db1.Exec("INSERT INTO projects (name, description) VALUES ($1, $2)", "Tenant 1 Project", "Project for tenant 1")
+	_, err = conn1.ExecContext(ctx, "INSERT INTO projects (name, description) VALUES ($1, $2)", "Tenant 1 Project", "Project for tenant 1")
 	if err != nil {
 		t.Fatalf("Failed to insert into tenant1 projects: %v", err)
 	}
 
 	// Insert data into tenant2's projects table
-	_, err = db2.Exec("INSERT INTO projects (name, description) VALUES ($1, $2)", "Tenant 2 Project", "Project for tenant 2")
+	_, err = conn2.ExecContext(ctx, "INSERT INTO projects (name, description) VALUES ($1, $2)", "Tenant 2 Project", "Project for tenant 2")
 	if err != nil {
 		t.Fatalf("Failed to insert into tenant2 projects: %v", err)
 	}
 
 	// Verify tenant1 can only see its own data
 	var count int
-	err = db1.QueryRow("SELECT COUNT(*) FROM projects WHERE name LIKE 'Tenant 1%'").Scan(&count)
+	err = conn1.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects WHERE name LIKE 'Tenant 1%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to count tenant1 projects: %v", err)
 	}
@@ -467,7 +469,7 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 	}
 
 	// Verify tenant2 can only see its own data
-	err = db2.QueryRow("SELECT COUNT(*) FROM projects WHERE name LIKE 'Tenant 2%'").Scan(&count)
+	err = conn2.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects WHERE name LIKE 'Tenant 2%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to count tenant2 projects: %v", err)
 	}
@@ -476,7 +478,7 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 	}
 
 	// Verify tenant1 cannot see tenant2's data
-	err = db1.QueryRow("SELECT COUNT(*) FROM projects WHERE name LIKE 'Tenant 2%'").Scan(&count)
+	err = conn1.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects WHERE name LIKE 'Tenant 2%'").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to check tenant1 isolation: %v", err)
 	}
