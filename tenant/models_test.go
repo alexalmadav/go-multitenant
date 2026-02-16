@@ -284,8 +284,8 @@ func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
 
 	// Test database config
-	if config.Database.Driver != "postgres" {
-		t.Errorf("DefaultConfig.Database.Driver = %v, want %v", config.Database.Driver, "postgres")
+	if config.Database.Driver != "pgx" {
+		t.Errorf("DefaultConfig.Database.Driver = %v, want %v", config.Database.Driver, "pgx")
 	}
 	if config.Database.MaxOpenConns != 100 {
 		t.Errorf("DefaultConfig.Database.MaxOpenConns = %v, want %v", config.Database.MaxOpenConns, 100)

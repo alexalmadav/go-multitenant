@@ -11,7 +11,8 @@ import (
 	"github.com/alexalmadav/go-multitenant/database/postgres"
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/alexalmadav/go-multitenant/tenant"
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/stdlib"
 	"go.uber.org/zap"
 )
 
@@ -139,12 +140,17 @@ func setupLogger(config tenant.LoggerConfig) (*zap.Logger, error) {
 	return logger, nil
 }
 
-// setupDatabase creates a database connection based on configuration
+// setupDatabase creates a database connection based on configuration.
+// It uses pgx with simple protocol to avoid unnamed prepared statement conflicts
+// when running behind PgBouncer in transaction-pooling mode.
 func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
-	db, err := sql.Open(config.Driver, config.DSN)
+	connConfig, err := pgx.ParseConfig(config.DSN)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse database DSN: %w", err)
 	}
+	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+
+	db := stdlib.OpenDB(*connConfig)
 
 	// Set connection pool settings
 	db.SetMaxOpenConns(config.MaxOpenConns)
