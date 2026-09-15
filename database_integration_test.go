@@ -1554,3 +1554,226 @@ func TestDatabase_GetTenantConn_ResetsSearchPathOnClose(t *testing.T) {
 		t.Errorf("pool connection still has tenant search_path after GetTenantConn close: %s", searchPath)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Migration tests (pure-Go migration manager)
+// ---------------------------------------------------------------------------
+
+// migrationTestEnv provisions n active tenants and returns the MultiTenant plus their IDs.
+func migrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uuid.UUID) {
+	t.Helper()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create MultiTenant: %v", err)
+	}
+	ctx := context.Background()
+	var ids []uuid.UUID
+	for i := 0; i < n; i++ {
+		id := uuid.New()
+		tt := &tenant.Tenant{
+			ID:        id,
+			Name:      fmt.Sprintf("Migration Tenant %d", i),
+			Subdomain: fmt.Sprintf("mig-%s", id.String()[:8]),
+			PlanType:  tenant.PlanBasic,
+		}
+		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
+			t.Fatalf("CreateTenant failed: %v", err)
+		}
+		if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+			t.Fatalf("ProvisionTenant failed: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() {
+		cleanupTestData(tdb.db, ids)
+		mt.Close()
+	})
+	return mt, ids
+}
+
+func widgetsMigration() *tenant.Migration {
+	rollback := "DROP TABLE widgets"
+	return &tenant.Migration{
+		Version:     "001",
+		Name:        "create_widgets",
+		SQL:         "CREATE TABLE widgets (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
+		RollbackSQL: &rollback,
+	}
+}
+
+func TestDatabase_Migrations_ApplyCreatesTableInTenantSchemaAndRecordsIt(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	tenantID := ids[0]
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(tenantID.String(), "-", "_"))
+
+	if err := mt.Migrations.ApplyMigration(ctx, tenantID, widgetsMigration()); err != nil {
+		t.Fatalf("ApplyMigration failed: %v", err)
+	}
+
+	inTenant, _ := tdb.tableExistsInSchema(schema, "widgets")
+	if !inTenant {
+		t.Errorf("widgets table should exist in %s", schema)
+	}
+	inPublic, _ := tdb.tableExistsInSchema("public", "widgets")
+	if inPublic {
+		t.Errorf("widgets table must not leak into public")
+	}
+
+	applied, err := mt.Migrations.IsMigrationApplied(ctx, tenantID, "001")
+	if err != nil || !applied {
+		t.Errorf("IsMigrationApplied = %v, %v; want true, nil", applied, err)
+	}
+
+	list, err := mt.Migrations.GetAppliedMigrations(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations failed: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 applied migration, got %d", len(list))
+	}
+	if list[0].Version != "001" || list[0].Name != "create_widgets" {
+		t.Errorf("unexpected migration record: %+v", list[0])
+	}
+	if list[0].Checksum == nil || len(*list[0].Checksum) != 64 {
+		t.Errorf("expected sha256 checksum to be recorded, got %v", list[0].Checksum)
+	}
+	if list[0].AppliedAt.IsZero() {
+		t.Errorf("expected applied_at to be set")
+	}
+}
+
+func TestDatabase_Migrations_ApplyIsIdempotent(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := mt.Migrations.ApplyMigration(ctx, ids[0], widgetsMigration()); err != nil {
+			t.Fatalf("ApplyMigration #%d failed: %v", i+1, err)
+		}
+	}
+	list, _ := mt.Migrations.GetAppliedMigrations(ctx, ids[0])
+	if len(list) != 1 {
+		t.Errorf("expected exactly 1 record after re-apply, got %d", len(list))
+	}
+}
+
+func TestDatabase_Migrations_FailedMigrationIsNotRecorded(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	bad := &tenant.Migration{Version: "002", Name: "broken", SQL: "CREATE TABLE ("}
+	if err := mt.Migrations.ApplyMigration(ctx, ids[0], bad); err == nil {
+		t.Fatalf("expected error applying invalid SQL")
+	}
+	applied, _ := mt.Migrations.IsMigrationApplied(ctx, ids[0], "002")
+	if applied {
+		t.Errorf("failed migration must not be recorded as applied")
+	}
+}
+
+func TestDatabase_Migrations_ApplyFailsWhenSchemaMissing(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, _ := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	unprovisioned := uuid.New()
+	tt := &tenant.Tenant{ID: unprovisioned, Name: "Unprovisioned", Subdomain: fmt.Sprintf("unprov-%s", unprovisioned.String()[:8])}
+	if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Migrations.ApplyMigration(ctx, unprovisioned, widgetsMigration()); err == nil {
+		t.Fatalf("expected error when tenant schema does not exist")
+	}
+}
+
+func TestDatabase_Migrations_RollbackRunsRollbackSQLAndRemovesRecord(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(ids[0].String(), "-", "_"))
+
+	if err := mt.Migrations.ApplyMigration(ctx, ids[0], widgetsMigration()); err != nil {
+		t.Fatalf("ApplyMigration failed: %v", err)
+	}
+	if err := mt.Migrations.RollbackMigration(ctx, ids[0], "001"); err != nil {
+		t.Fatalf("RollbackMigration failed: %v", err)
+	}
+	exists, _ := tdb.tableExistsInSchema(schema, "widgets")
+	if exists {
+		t.Errorf("widgets table should have been dropped by rollback")
+	}
+	applied, _ := mt.Migrations.IsMigrationApplied(ctx, ids[0], "001")
+	if applied {
+		t.Errorf("migration should no longer be recorded after rollback")
+	}
+}
+
+func TestDatabase_Migrations_RollbackWithoutRollbackSQLFails(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	m := widgetsMigration()
+	m.RollbackSQL = nil
+	if err := mt.Migrations.ApplyMigration(ctx, ids[0], m); err != nil {
+		t.Fatalf("ApplyMigration failed: %v", err)
+	}
+	if err := mt.Migrations.RollbackMigration(ctx, ids[0], "001"); err == nil {
+		t.Fatalf("expected error rolling back a migration with no rollback SQL")
+	}
+	applied, _ := mt.Migrations.IsMigrationApplied(ctx, ids[0], "001")
+	if !applied {
+		t.Errorf("migration record must remain when rollback fails")
+	}
+}
+
+func TestDatabase_Migrations_ApplyToAllTenants_SkipsInactiveAndReportsFailures(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 3)
+	ctx := context.Background()
+	okID, suspendedID, brokenID := ids[0], ids[1], ids[2]
+
+	if err := mt.Manager.SuspendTenant(ctx, suspendedID); err != nil {
+		t.Fatalf("SuspendTenant failed: %v", err)
+	}
+	// Make brokenID fail by removing its schema out from under the manager.
+	brokenSchema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(brokenID.String(), "-", "_"))
+	if _, err := tdb.db.Exec(fmt.Sprintf(`DROP SCHEMA "%s" CASCADE`, brokenSchema)); err != nil {
+		t.Fatalf("failed to drop schema: %v", err)
+	}
+
+	err := mt.Migrations.ApplyToAllTenants(ctx, widgetsMigration())
+	if err == nil {
+		t.Fatalf("expected an error because one tenant's schema is missing")
+	}
+	if !strings.Contains(err.Error(), brokenID.String()) {
+		t.Errorf("error should name the failing tenant %s, got: %v", brokenID, err)
+	}
+
+	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, okID, "001"); !applied {
+		t.Errorf("active tenant should have received the migration")
+	}
+	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, suspendedID, "001"); applied {
+		t.Errorf("suspended tenant should not receive the migration")
+	}
+	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, brokenID, "001"); applied {
+		t.Errorf("tenant without schema must not be recorded as migrated")
+	}
+}

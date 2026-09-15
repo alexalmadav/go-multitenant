@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/alexalmadav/go-multitenant/tenant"
@@ -50,7 +51,7 @@ func setupTestDatabase(t *testing.T) *sql.DB {
 func cleanupTestData(db *sql.DB, tenantIDs []uuid.UUID) {
 	// Drop tenant schemas
 	for _, tenantID := range tenantIDs {
-		schemaName := fmt.Sprintf("tenant_%s", tenantID.String())
+		schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(tenantID.String(), "-", "_"))
 		schemaName = "\"" + schemaName + "\""
 		_, _ = db.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
 	}

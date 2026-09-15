@@ -20,6 +20,7 @@ import (
 type MultiTenant struct {
 	Manager       tenant.Manager
 	Resolver      tenant.Resolver
+	Migrations    tenant.MigrationManager
 	GinMiddleware *ginmiddleware.Middleware
 	db            *sql.DB
 	logger        *zap.Logger
@@ -50,9 +51,9 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Create schema manager
 	schemaManager := database.NewSchemaManager(db, logger, config.Database.SchemaPrefix)
 
-	// Create migration manager using PostgreSQL functions
+	// Create migration manager
 	// Note: Applications should specify their own migrations directory path
-	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir)
+	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir, schemaManager, repository)
 
 	// Create limit checker
 	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
@@ -73,6 +74,7 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	return &MultiTenant{
 		Manager:       manager,
 		Resolver:      resolver,
+		Migrations:    migrationMgr,
 		GinMiddleware: ginMw,
 		db:            db,
 		logger:        logger,
