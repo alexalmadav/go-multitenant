@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -395,8 +394,7 @@ func (m *manager) validateSubdomain(subdomain string) error {
 	}
 
 	// Check for valid characters (alphanumeric and hyphens only)
-	validSubdomain := regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
-	if !validSubdomain.MatchString(subdomain) {
+	if !subdomainPattern.MatchString(subdomain) {
 		return fmt.Errorf("subdomain must contain only lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen")
 	}
 

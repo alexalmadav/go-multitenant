@@ -182,6 +182,9 @@ type (
 	Limits    = tenant.Limits
 	Stats     = tenant.Stats
 	Migration = tenant.Migration
+
+	TenantError     = tenant.TenantError
+	ValidationError = tenant.ValidationError
 )
 
 // Re-export key constants

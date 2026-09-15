@@ -422,3 +422,14 @@ func (m *MockMultiTenantResolver) ValidateSubdomain(subdomain string) error {
 }
 
 // MockGinMiddleware removed as it's not needed for these tests
+
+func TestReExportedErrorTypes(t *testing.T) {
+	var tenantErr error = &TenantError{Code: "X", Message: "x"}
+	var validationErr error = &ValidationError{Field: "f", Message: "m"}
+	if _, ok := tenantErr.(*tenant.TenantError); !ok {
+		t.Error("multitenant.TenantError should alias tenant.TenantError")
+	}
+	if _, ok := validationErr.(*tenant.ValidationError); !ok {
+		t.Error("multitenant.ValidationError should alias tenant.ValidationError")
+	}
+}

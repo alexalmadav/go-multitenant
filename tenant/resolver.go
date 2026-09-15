@@ -12,6 +12,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// subdomainPattern matches a valid tenant subdomain: lowercase alphanumerics
+// and hyphens, not starting or ending with a hyphen.
+var subdomainPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
+
 // resolver implements the Resolver interface
 type resolver struct {
 	config     ResolverConfig
@@ -75,16 +79,31 @@ func (r *resolver) ExtractFromSubdomain(host string) (string, error) {
 	if colonIndex := strings.Index(host, ":"); colonIndex != -1 {
 		host = host[:colonIndex]
 	}
+	host = strings.ToLower(host)
 
-	// Extract subdomain from host (e.g., "tenant.domain.com" -> "tenant")
-	parts := strings.Split(host, ".")
-
-	// Need at least subdomain.domain.tld
-	if len(parts) < 3 {
-		return "", fmt.Errorf("invalid host format: %s", host)
+	var subdomain string
+	if domain := strings.ToLower(strings.TrimPrefix(r.config.Domain, ".")); domain != "" {
+		// With a configured domain the host must be exactly <subdomain>.<domain>.
+		suffix := "." + domain
+		if !strings.HasSuffix(host, suffix) {
+			return "", fmt.Errorf("host %s is not under configured domain %s", host, domain)
+		}
+		subdomain = strings.TrimSuffix(host, suffix)
+		if subdomain == "" {
+			return "", fmt.Errorf("no subdomain in host: %s", host)
+		}
+		if strings.Contains(subdomain, ".") {
+			return "", fmt.Errorf("nested subdomains are not supported: %s", host)
+		}
+	} else {
+		// Without a configured domain, fall back to the first label of a
+		// host with at least three labels (subdomain.domain.tld).
+		parts := strings.Split(host, ".")
+		if len(parts) < 3 {
+			return "", fmt.Errorf("invalid host format: %s", host)
+		}
+		subdomain = parts[0]
 	}
-
-	subdomain := parts[0]
 
 	// Check for reserved subdomains
 	for _, reserved := range r.config.ReservedSubdomain {
@@ -161,8 +180,7 @@ func (r *resolver) ValidateSubdomain(subdomain string) error {
 	}
 
 	// Check for valid characters (alphanumeric and hyphens only)
-	validSubdomain := regexp.MustCompile(`^[a-z0-9][a-z0-9-]*[a-z0-9]$`)
-	if !validSubdomain.MatchString(subdomain) {
+	if !subdomainPattern.MatchString(subdomain) {
 		return errors.New("subdomain must contain only lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen")
 	}
 

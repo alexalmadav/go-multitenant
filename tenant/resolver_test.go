@@ -543,3 +543,39 @@ var ErrTenantNotFound = &TenantError{
 	Code:    "TENANT_NOT_FOUND",
 	Message: "tenant not found",
 }
+
+func TestResolver_ExtractFromSubdomain_HonorsConfiguredDomain(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	newResolver := func(domain string) Resolver {
+		return NewResolver(ResolverConfig{Strategy: ResolverSubdomain, Domain: domain}, &mockRepository{}, logger)
+	}
+
+	tests := []struct {
+		name    string
+		domain  string
+		host    string
+		want    string
+		wantErr bool
+	}{
+		{name: "host under configured domain", domain: "example.com", host: "acme.example.com", want: "acme"},
+		{name: "host under configured domain with port", domain: "example.com", host: "acme.example.com:8080", want: "acme"},
+		{name: "host under a different domain is rejected", domain: "example.com", host: "acme.attacker.com", wantErr: true},
+		{name: "bare configured domain has no tenant", domain: "example.com", host: "example.com", wantErr: true},
+		{name: "nested label is rejected", domain: "example.com", host: "deep.acme.example.com", wantErr: true},
+		{name: "single-label domain works for local dev", domain: "localhost", host: "acme.localhost:3000", want: "acme"},
+		{name: "domain match is case-insensitive", domain: "Example.com", host: "acme.EXAMPLE.com", want: "acme"},
+		{name: "no domain configured falls back to first label", domain: "", host: "acme.anything.io", want: "acme"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := newResolver(tt.domain).ExtractFromSubdomain(tt.host)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ExtractFromSubdomain(%q) error = %v, wantErr %v", tt.host, err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("ExtractFromSubdomain(%q) = %q, want %q", tt.host, got, tt.want)
+			}
+		})
+	}
+}
