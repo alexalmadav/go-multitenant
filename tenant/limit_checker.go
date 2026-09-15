@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -38,6 +39,7 @@ type LimitChecker interface {
 
 // limitChecker implements the LimitChecker interface
 type limitChecker struct {
+	mu           sync.RWMutex
 	config       LimitsConfig
 	repository   Repository
 	logger       *zap.Logger
@@ -104,8 +106,8 @@ func (lc *limitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limi
 	}
 
 	// Get current usage if not provided
-	if currentValue == nil && lc.usageTracker != nil {
-		currentValue, err = lc.usageTracker.GetCurrentUsage(ctx, tenantID, limitName)
+	if tracker := lc.GetUsageTracker(); currentValue == nil && tracker != nil {
+		currentValue, err = tracker.GetCurrentUsage(ctx, tenantID, limitName)
 		if err != nil {
 			lc.logger.Warn("Failed to get current usage, skipping limit check",
 				zap.String("tenant_id", tenantID.String()),
@@ -303,26 +305,48 @@ func (lc *limitChecker) validateDurationLimit(tenantID uuid.UUID, limitName stri
 // Schema management
 
 func (lc *limitChecker) GetLimitSchema() *LimitSchema {
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
 	return lc.schema
 }
 
 func (lc *limitChecker) SetLimitSchema(schema *LimitSchema) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
 	lc.schema = schema
 }
 
 // Plan limit management
 
+// GetLimitsForPlan returns a snapshot of the plan's limits. Mutating the
+// returned map does not affect the checker; use AddLimit/UpdateLimit/RemoveLimit.
 func (lc *limitChecker) GetLimitsForPlan(planType string) FlexibleLimits {
-	return lc.planLimits[planType]
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
+	limits, ok := lc.planLimits[planType]
+	if !ok {
+		return nil
+	}
+	snapshot := make(FlexibleLimits, len(limits))
+	for name, lv := range limits {
+		copied := *lv
+		snapshot[name] = &copied
+	}
+	return snapshot
 }
 
 func (lc *limitChecker) SetLimitsForPlan(planType string, limits FlexibleLimits) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
 	lc.planLimits[planType] = limits
 }
 
 // Limit management
 
 func (lc *limitChecker) AddLimit(planType, limitName string, limitType LimitType, value interface{}) error {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+
 	// Validate limit definition exists in schema
 	if _, exists := lc.schema.GetDefinition(limitName); !exists {
 		// Add to schema if not exists
@@ -357,6 +381,8 @@ func (lc *limitChecker) AddLimit(planType, limitName string, limitType LimitType
 }
 
 func (lc *limitChecker) RemoveLimit(planType, limitName string) error {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
 	if planLimits, exists := lc.planLimits[planType]; exists {
 		delete(planLimits, limitName)
 		lc.logger.Info("Removed limit from plan",
@@ -367,6 +393,8 @@ func (lc *limitChecker) RemoveLimit(planType, limitName string) error {
 }
 
 func (lc *limitChecker) UpdateLimit(planType, limitName string, value interface{}) error {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
 	planLimits := lc.planLimits[planType]
 	if planLimits == nil {
 		return fmt.Errorf("plan %s not found", planType)
@@ -377,7 +405,8 @@ func (lc *limitChecker) UpdateLimit(planType, limitName string, value interface{
 		return fmt.Errorf("limit %s not found in plan %s", limitName, planType)
 	}
 
-	limit.Value = value
+	// Replace rather than mutate so snapshots handed out earlier stay stable.
+	planLimits[limitName] = &LimitValue{Type: limit.Type, Value: value}
 
 	lc.logger.Info("Updated limit value",
 		zap.String("plan", planType),
@@ -390,15 +419,19 @@ func (lc *limitChecker) UpdateLimit(planType, limitName string, value interface{
 // Validation
 
 func (lc *limitChecker) ValidateLimits(planType string, limits FlexibleLimits) error {
-	return lc.schema.ValidateLimits(limits)
+	return lc.GetLimitSchema().ValidateLimits(limits)
 }
 
 // Usage tracker integration
 
 func (lc *limitChecker) SetUsageTracker(tracker UsageTracker) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
 	lc.usageTracker = tracker
 }
 
 func (lc *limitChecker) GetUsageTracker() UsageTracker {
+	lc.mu.RLock()
+	defer lc.mu.RUnlock()
 	return lc.usageTracker
 }

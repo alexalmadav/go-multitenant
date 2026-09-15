@@ -233,6 +233,11 @@ func (m *manager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits,
 	return limits, nil
 }
 
+// LimitChecker returns the limit checker used by CheckLimits.
+func (m *manager) LimitChecker() LimitChecker {
+	return m.limitChecker
+}
+
 // GetStats retrieves tenant usage statistics
 func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
 	return m.repository.GetStats(ctx, tenantID)

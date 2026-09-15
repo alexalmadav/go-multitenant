@@ -55,8 +55,10 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Note: Applications should specify their own migrations directory path
 	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir, schemaManager, repository)
 
-	// Create limit checker
+	// Create limit checker with a usage tracker that counts rows in the tenant schema.
+	// Applications can replace it via Manager.LimitChecker().SetUsageTracker.
 	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
+	limitChecker.SetUsageTracker(postgres.NewUsageTracker(db, schemaManager, logger))
 
 	// Create tenant manager
 	manager := tenant.NewManager(config, db, repository, schemaManager, migrationMgr, limitChecker, logger)

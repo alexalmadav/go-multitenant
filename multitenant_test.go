@@ -382,6 +382,10 @@ func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uui
 	return nil, nil
 }
 
+func (m *MockMultiTenantManager) LimitChecker() tenant.LimitChecker {
+	return nil
+}
+
 func (m *MockMultiTenantManager) WithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(tx *sql.Tx) error) error {
 	return nil
 }

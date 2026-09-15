@@ -3,6 +3,7 @@ package multitenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -1775,5 +1776,93 @@ func TestDatabase_Migrations_ApplyToAllTenants_SkipsInactiveAndReportsFailures(t
 	}
 	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, brokenID, "001"); applied {
 		t.Errorf("tenant without schema must not be recorded as migrated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Limit enforcement tests
+// ---------------------------------------------------------------------------
+
+func TestDatabase_Limits_ProjectCountAboveBasicPlanIsRejected(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	tenantID := ids[0]
+
+	// Basic plan allows 10 projects; insert 11.
+	err := mt.Manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		for i := 0; i < 11; i++ {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", fmt.Sprintf("p%d", i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to seed projects: %v", err)
+	}
+
+	_, err = mt.Manager.CheckLimits(ctx, tenantID)
+	if err == nil {
+		t.Fatalf("expected CheckLimits to fail with 11 projects on the basic plan")
+	}
+	var tenantErr *tenant.TenantError
+	if !errors.As(err, &tenantErr) || tenantErr.Code != "LIMIT_EXCEEDED" {
+		t.Errorf("expected LIMIT_EXCEEDED TenantError, got: %v", err)
+	}
+}
+
+func TestDatabase_Limits_ProjectCountAtBasicPlanLimitIsAllowed(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	tenantID := ids[0]
+
+	err := mt.Manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		for i := 0; i < 10; i++ {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", fmt.Sprintf("p%d", i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to seed projects: %v", err)
+	}
+
+	if _, err := mt.Manager.CheckLimits(ctx, tenantID); err != nil {
+		t.Errorf("10 projects should be within the basic plan limit, got: %v", err)
+	}
+}
+
+func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	checker := mt.Manager.LimitChecker()
+	if checker == nil {
+		t.Fatalf("Manager.LimitChecker() returned nil")
+	}
+	if checker.GetUsageTracker() == nil {
+		t.Fatalf("New() should wire a default usage tracker")
+	}
+
+	// Tighten the basic plan at runtime and verify it takes effect.
+	if err := checker.UpdateLimit(tenant.PlanBasic, "max_projects", 0); err != nil {
+		t.Fatalf("UpdateLimit failed: %v", err)
+	}
+	err := mt.Manager.WithTenantTx(ctx, ids[0], func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ('only')")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to seed project: %v", err)
+	}
+	if _, err := mt.Manager.CheckLimits(ctx, ids[0]); err == nil {
+		t.Errorf("expected failure after lowering max_projects to 0")
 	}
 }

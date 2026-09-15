@@ -1,6 +1,7 @@
 package gin
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -214,12 +215,14 @@ func (m *Middleware) EnforceLimits() gin.HandlerFunc {
 				zap.String("tenant_id", tenantCtx.TenantID.String()),
 				zap.Error(err))
 
-			// Determine error type and response
-			if strings.Contains(err.Error(), "limit exceeded") {
+			// A limit violation is a TenantError with a known code; anything
+			// else is an infrastructure failure.
+			var tenantErr *tenant.TenantError
+			if errors.As(err, &tenantErr) && (tenantErr.Code == "LIMIT_EXCEEDED" || tenantErr.Code == "FEATURE_NOT_ALLOWED") {
 				m.config.ErrorHandler(c, &tenant.TenantError{
 					TenantID: tenantCtx.TenantID,
 					Code:     "PLAN_LIMIT_EXCEEDED",
-					Message:  err.Error(),
+					Message:  tenantErr.Message,
 				})
 			} else {
 				m.config.ErrorHandler(c, &tenant.TenantError{
