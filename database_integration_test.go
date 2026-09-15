@@ -74,6 +74,7 @@ type testDB struct {
 	logger    *zap.Logger
 	t         *testing.T
 	container *postgresContainer
+	dsn       string
 }
 
 // newTestDB creates a new test database connection using testcontainers
@@ -107,6 +108,7 @@ func newTestDB(t *testing.T) *testDB {
 			db:     db,
 			logger: zaptest.NewLogger(t),
 			t:      t,
+			dsn:    dbURL,
 		}
 	}
 
@@ -119,6 +121,7 @@ func newTestDB(t *testing.T) *testDB {
 			db:     db,
 			logger: zaptest.NewLogger(t),
 			t:      t,
+			dsn:    defaultURL,
 		}
 	}
 
@@ -140,6 +143,7 @@ func newTestDB(t *testing.T) *testDB {
 		logger:    zaptest.NewLogger(t),
 		t:         t,
 		container: container,
+		dsn:       container.ConnectionString,
 	}
 }
 
@@ -153,10 +157,7 @@ func (tdb *testDB) close() {
 }
 
 func (tdb *testDB) getConnectionString() string {
-	if tdb.container != nil {
-		return tdb.container.ConnectionString
-	}
-	return os.Getenv("TEST_DATABASE_URL")
+	return tdb.dsn
 }
 
 // cleanupSchema drops a tenant schema and any tables that leaked to public
@@ -1491,5 +1492,65 @@ func TestDatabase_WithTenantTx_ConcurrentIsolation(t *testing.T) {
 		}
 	} else {
 		t.Logf("All %d tenants correctly isolated during concurrent WithTenantTx operations", numTenants)
+	}
+}
+
+// TestDatabase_GetTenantConn_ResetsSearchPathOnClose verifies that a connection
+// returned to the pool after GetTenantConn does not keep the tenant search_path.
+func TestDatabase_GetTenantConn_ResetsSearchPathOnClose(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	// Force every query through the same underlying connection so a leaked
+	// session setting is guaranteed to be observed.
+	config.Database.MaxOpenConns = 1
+	config.Database.MaxIdleConns = 1
+
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create MultiTenant: %v", err)
+	}
+	defer mt.Close()
+
+	ctx := context.Background()
+	tenantID := uuid.New()
+	defer cleanupTestData(tdb.db, []uuid.UUID{tenantID})
+
+	testTenant := &tenant.Tenant{
+		ID:        tenantID,
+		Name:      "Reset SearchPath Tenant",
+		Subdomain: fmt.Sprintf("reset-sp-%s", tenantID.String()[:8]),
+		PlanType:  tenant.PlanBasic,
+	}
+	if err := mt.Manager.CreateTenant(ctx, testTenant); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, tenantID); err != nil {
+		t.Fatalf("ProvisionTenant failed: %v", err)
+	}
+
+	conn, err := mt.Manager.GetTenantConn(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("GetTenantConn failed: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("conn.Close failed: %v", err)
+	}
+
+	var searchPath string
+	if err := mt.GetDatabase().QueryRowContext(ctx, "SHOW search_path").Scan(&searchPath); err != nil {
+		t.Fatalf("Failed to read pool search_path: %v", err)
+	}
+
+	tenantSchema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(tenantID.String(), "-", "_"))
+	if strings.Contains(searchPath, tenantSchema) {
+		t.Errorf("pool connection still has tenant search_path after GetTenantConn close: %s", searchPath)
 	}
 }

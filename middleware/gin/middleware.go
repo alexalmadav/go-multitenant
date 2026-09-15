@@ -1,7 +1,6 @@
 package gin
 
 import (
-	"database/sql"
 	"net/http"
 	"strings"
 
@@ -371,13 +370,13 @@ func GetTenantLimitsFromContext(c *gin.Context) (*tenant.Limits, bool) {
 // The connection has the tenant's search_path already set and is safe to use
 // for tenant-scoped queries. Do NOT close this connection manually - it will
 // be closed automatically when the request completes.
-func GetTenantConnFromContext(c *gin.Context) (*sql.Conn, bool) {
+func GetTenantConnFromContext(c *gin.Context) (*tenant.Conn, bool) {
 	conn, exists := c.Get("tenant_conn")
 	if !exists {
 		return nil, false
 	}
 
-	tc, ok := conn.(*sql.Conn)
+	tc, ok := conn.(*tenant.Conn)
 	return tc, ok
 }
 

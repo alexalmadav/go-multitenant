@@ -257,7 +257,7 @@ func (m *manager) GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB,
 
 // GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
 // The caller MUST close the connection when done to return it to the pool.
-func (m *manager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, error) {
+func (m *manager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*Conn, error) {
 	// Get a dedicated connection from the pool
 	conn, err := m.db.Conn(ctx)
 	if err != nil {
@@ -277,7 +277,7 @@ func (m *manager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*sql.C
 		zap.String("tenant_id", tenantID.String()),
 		zap.String("schema", schemaName))
 
-	return conn, nil
+	return &Conn{Conn: conn}, nil
 }
 
 // WithTenantTx executes a function within a transaction with the tenant's search_path set.

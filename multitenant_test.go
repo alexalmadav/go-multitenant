@@ -378,7 +378,7 @@ func (m *MockMultiTenantManager) GetTenantDB(ctx context.Context, tenantID uuid.
 	return &sql.DB{}, nil
 }
 
-func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, error) {
+func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*tenant.Conn, error) {
 	return nil, nil
 }
 
