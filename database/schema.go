@@ -150,15 +150,16 @@ func (sm *SchemaManager) SetSearchPath(db *sql.DB, tenantID uuid.UUID) error {
 
 // ListTenantSchemas returns all tenant schemas found in the database
 func (sm *SchemaManager) ListTenantSchemas(ctx context.Context) ([]string, error) {
+	// starts_with is a literal prefix match; LIKE would treat "_" in the
+	// prefix as a wildcard.
 	query := `
-		SELECT schema_name 
-		FROM information_schema.schemata 
-		WHERE schema_name LIKE $1
+		SELECT schema_name
+		FROM information_schema.schemata
+		WHERE starts_with(schema_name, $1)
 		ORDER BY schema_name
 	`
 
-	searchPattern := sm.schemaPrefix + "%"
-	rows, err := sm.db.QueryContext(ctx, query, searchPattern)
+	rows, err := sm.db.QueryContext(ctx, query, sm.schemaPrefix)
 	if err != nil {
 		sm.logger.Error("Failed to list tenant schemas", zap.Error(err))
 		return nil, fmt.Errorf("error listing tenant schemas: %w", err)

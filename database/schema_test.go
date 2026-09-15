@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"testing"
 
 	"github.com/google/uuid"
@@ -44,84 +43,6 @@ func TestSchemaManager_GetSchemaName(t *testing.T) {
 	}
 }
 
-func TestSchemaManager_CreateTenantSchema(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	sm := NewSchemaManager(nil, logger, "tenant_")
-
-	tenantID := uuid.New()
-	err := sm.CreateTenantSchema(context.Background(), tenantID, "Test Tenant")
-	if err != nil {
-		t.Errorf("CreateTenantSchema() error = %v, want nil", err)
-	}
-}
-
-func TestSchemaManager_DropTenantSchema(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	sm := NewSchemaManager(nil, logger, "tenant_")
-
-	tenantID := uuid.New()
-	err := sm.DropTenantSchema(context.Background(), tenantID)
-	if err != nil {
-		t.Errorf("DropTenantSchema() error = %v, want nil", err)
-	}
-}
-
-func TestSchemaManager_SchemaExists(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	sm := NewSchemaManager(nil, logger, "tenant_")
-
-	tenantID := uuid.New()
-	exists, err := sm.SchemaExists(context.Background(), tenantID)
-	if err != nil {
-		t.Errorf("SchemaExists() error = %v, want nil", err)
-	}
-
-	// Should return false for non-existent schema
-	if exists {
-		t.Error("SchemaExists() should return false for non-existent schema")
-	}
-}
-
-func TestSchemaManager_SetSearchPath(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	sm := NewSchemaManager(nil, logger, "tenant_")
-
-	tenantID := uuid.New()
-	err := sm.SetSearchPath(nil, tenantID)
-	if err == nil {
-		t.Error("SetSearchPath() should error with nil database")
-	}
-}
-
-func TestSchemaManager_ListTenantSchemas(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	sm := NewSchemaManager(nil, logger, "tenant_")
-
-	schemas, err := sm.ListTenantSchemas(context.Background())
-	if err != nil {
-		t.Errorf("ListTenantSchemas() error = %v, want nil", err)
-	}
-
-	if schemas == nil {
-		t.Error("ListTenantSchemas() should not return nil")
-	}
-}
-
 func TestSchemaManager_quotedSchemaName(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	sm := NewSchemaManager(nil, logger, "tenant_")
@@ -135,20 +56,6 @@ func TestSchemaManager_quotedSchemaName(t *testing.T) {
 
 	if quoted[0] != '"' || quoted[len(quoted)-1] != '"' {
 		t.Error("quotedSchemaName() should start and end with quotes")
-	}
-}
-
-func TestSchemaManager_createTenantTables(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	sm := NewSchemaManager(nil, logger, "tenant_")
-
-	// Test with nil transaction should fail
-	err := sm.createTenantTables(context.Background(), nil, `"test_schema"`)
-	if err == nil {
-		t.Error("createTenantTables() should error with nil transaction")
 	}
 }
 

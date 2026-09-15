@@ -1866,3 +1866,42 @@ func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
 		t.Errorf("expected failure after lowering max_projects to 0")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Schema listing
+// ---------------------------------------------------------------------------
+
+func TestDatabase_ListTenantSchemas_OnlyMatchesPrefixLiterally(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	want := fmt.Sprintf("tenant_%s", strings.ReplaceAll(ids[0].String(), "-", "_"))
+
+	// "_" is a LIKE wildcard; a schema named tenantXdecoy must not be listed
+	// for the prefix "tenant_".
+	decoy := fmt.Sprintf("tenantXdecoy_%s", ids[0].String()[:8])
+	if _, err := tdb.db.Exec(fmt.Sprintf(`CREATE SCHEMA "%s"`, decoy)); err != nil {
+		t.Fatalf("failed to create decoy schema: %v", err)
+	}
+	t.Cleanup(func() { _, _ = tdb.db.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, decoy)) })
+
+	sm := database.NewSchemaManager(mt.GetDatabase(), tdb.logger, "tenant_")
+	schemas, err := sm.ListTenantSchemas(ctx)
+	if err != nil {
+		t.Fatalf("ListTenantSchemas failed: %v", err)
+	}
+
+	found := false
+	for _, s := range schemas {
+		if s == want {
+			found = true
+		}
+		if s == decoy {
+			t.Errorf("ListTenantSchemas returned %q, which does not start with the literal prefix tenant_", s)
+		}
+	}
+	if !found {
+		t.Errorf("ListTenantSchemas did not include provisioned schema %s (got %v)", want, schemas)
+	}
+}
