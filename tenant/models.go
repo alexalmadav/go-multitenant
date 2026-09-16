@@ -8,14 +8,15 @@ import (
 
 // Tenant represents a tenant in the multi-tenant system
 type Tenant struct {
-	ID         uuid.UUID `json:"id"`
-	Name       string    `json:"name"`
-	Subdomain  string    `json:"subdomain"`
-	PlanType   string    `json:"plan_type"`
-	Status     string    `json:"status"`
-	SchemaName string    `json:"schema_name"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uuid.UUID      `json:"id"`
+	Name       string         `json:"name"`
+	Subdomain  string         `json:"subdomain"`
+	PlanType   string         `json:"plan_type"`
+	Status     string         `json:"status"`
+	SchemaName string         `json:"schema_name"`
+	Metadata   TenantMetadata `json:"metadata"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
 // Context represents the current tenant context for a request

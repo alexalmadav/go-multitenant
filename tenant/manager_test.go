@@ -805,6 +805,17 @@ func (m *MockManagerRepository) List(ctx context.Context, page, perPage int) ([]
 	return activeTenants[start:end], total, nil
 }
 
+// FindByMetadata returns tenants whose metadata[key] equals value.
+func (m *MockManagerRepository) FindByMetadata(ctx context.Context, key, value string) ([]*Tenant, error) {
+	var out []*Tenant
+	for _, t := range m.tenants {
+		if s, ok := t.Metadata.GetString(key); ok && s == value {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 // NewMockSchemaManager creates a mock schema manager for testing
 func NewMockSchemaManager(prefix string) *MockManagerSchemaManager {
 	if prefix == "" {

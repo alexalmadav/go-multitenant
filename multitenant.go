@@ -188,14 +188,15 @@ func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
 
 // Re-export key types and functions for convenience
 type (
-	Tenant    = tenant.Tenant
-	Context   = tenant.Context
-	Config    = tenant.Config
-	Manager   = tenant.Manager
-	Resolver  = tenant.Resolver
-	Limits    = tenant.Limits
-	Stats     = tenant.Stats
-	Migration = tenant.Migration
+	Tenant         = tenant.Tenant
+	Context        = tenant.Context
+	Config         = tenant.Config
+	Manager        = tenant.Manager
+	Resolver       = tenant.Resolver
+	Limits         = tenant.Limits
+	Stats          = tenant.Stats
+	Migration      = tenant.Migration
+	TenantMetadata = tenant.TenantMetadata
 
 	TenantError     = tenant.TenantError
 	ValidationError = tenant.ValidationError
@@ -222,4 +223,6 @@ var (
 	DefaultConfig          = tenant.DefaultConfig
 	GetTenantFromContext   = tenant.GetTenantFromContext
 	GetTenantIDFromContext = tenant.GetTenantIDFromContext
+	NewStripeExtension     = tenant.NewStripeExtension
+	NewBrandingExtension   = tenant.NewBrandingExtension
 )

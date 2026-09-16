@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/alexalmadav/go-multitenant/database"
+	dbpostgres "github.com/alexalmadav/go-multitenant/database/postgres"
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/gin-gonic/gin"
@@ -2467,5 +2468,84 @@ func TestDatabase_GetStats_ReportsMigrationsAndUsage(t *testing.T) {
 	}
 	if stats.Usage["max_projects"] != 2 || stats.Usage["max_users"] != 0 {
 		t.Errorf("Usage = %v, want max_projects=2 max_users=0", stats.Usage)
+	}
+}
+
+func TestDatabase_Metadata_RoundTripsThroughRepositoryAndFindByMetadata(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 2)
+	ctx := context.Background()
+
+	first, _ := mt.Manager.GetTenant(ctx, ids[0])
+	if first.Metadata == nil {
+		t.Fatal("Metadata should never be nil after a read")
+	}
+	tenant.NewStripeExtension(first.Metadata).SetCustomerID("cus_abc")
+	first.Metadata.SetInt("seats", 7)
+	if err := mt.Manager.UpdateTenant(ctx, first); err != nil {
+		t.Fatalf("UpdateTenant: %v", err)
+	}
+
+	got, _ := mt.Manager.GetTenant(ctx, ids[0])
+	if id, _ := tenant.NewStripeExtension(got.Metadata).GetCustomerID(); id != "cus_abc" {
+		t.Errorf("customer id = %q", id)
+	}
+	if n, _ := got.Metadata.GetInt("seats"); n != 7 {
+		t.Errorf("seats = %d", n)
+	}
+	bySub, _ := mt.Manager.GetTenantBySubdomain(ctx, got.Subdomain)
+	if bySub.Metadata["seats"] == nil {
+		t.Errorf("GetBySubdomain should load metadata")
+	}
+	list, _, _ := mt.Manager.ListTenants(ctx, 1, 100)
+	found := false
+	for _, lt := range list {
+		if lt.ID == ids[0] && lt.Metadata["seats"] != nil {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("List should load metadata")
+	}
+
+	repo := dbpostgres.NewRepository(mt.GetDatabase(), mt.GetLogger())
+	matches, err := repo.FindByMetadata(ctx, "stripe_customer_id", "cus_abc")
+	if err != nil || len(matches) != 1 || matches[0].ID != ids[0] {
+		t.Errorf("FindByMetadata = %v, %v; want only %s", matches, err, ids[0])
+	}
+}
+
+func TestDatabase_Metadata_ColumnIsAddedToPreExistingTenantsTable(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	// Simulate a database created by an older version: no metadata column.
+	if _, err := tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tdb.db.Exec(`CREATE TABLE public.tenants (
+		id UUID PRIMARY KEY, name VARCHAR(255) NOT NULL, subdomain VARCHAR(255) UNIQUE NOT NULL,
+		plan_type VARCHAR(50) NOT NULL DEFAULT 'basic', status VARCHAR(50) NOT NULL DEFAULT 'pending',
+		schema_name VARCHAR(255) NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+
+	mt, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer mt.Close()
+
+	var exists bool
+	err = tdb.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='tenants' AND column_name='metadata')`).Scan(&exists)
+	if err != nil || !exists {
+		t.Errorf("metadata column should have been added, exists=%v err=%v", exists, err)
 	}
 }

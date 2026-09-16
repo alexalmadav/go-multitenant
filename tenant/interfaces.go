@@ -109,6 +109,8 @@ type Repository interface {
 	Update(ctx context.Context, tenant *Tenant) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context, page, perPage int) ([]*Tenant, int, error)
+	// FindByMetadata returns tenants whose metadata[key] equals value (as text).
+	FindByMetadata(ctx context.Context, key, value string) ([]*Tenant, error)
 }
 
 // Middleware represents HTTP middleware for tenant handling
