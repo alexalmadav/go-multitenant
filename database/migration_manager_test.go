@@ -289,3 +289,49 @@ func TestMigrationManager_Interface(t *testing.T) {
 	// Test that it implements the MigrationManager interface
 	var _ tenant.MigrationManager = mgr
 }
+
+func TestMigrationManager_ListMigrationFiles_SortedByFilename(t *testing.T) {
+	dir := t.TempDir()
+	for _, f := range []string{"010_late.up.sql", "002_second.up.sql", "001_first.up.sql", "001_first.down.sql"} {
+		if err := os.WriteFile(filepath.Join(dir, f), []byte("-- x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mgr := NewMigrationManager(nil, zaptest.NewLogger(t), dir, nil, nil).(*MigrationManager)
+
+	got, err := mgr.ListMigrationFiles()
+	if err != nil {
+		t.Fatalf("ListMigrationFiles: %v", err)
+	}
+	want := []string{"001_first", "002_second", "010_late"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("index %d: got %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestMigrationManager_ListMigrationFiles_RejectsBadNames(t *testing.T) {
+	cases := map[string][]string{
+		"no underscore":    {"001.up.sql"},
+		"empty name":       {"001_.up.sql"},
+		"orphan down file": {"001_first.down.sql"},
+	}
+	for name, files := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, f := range files {
+				if err := os.WriteFile(filepath.Join(dir, f), []byte("-- x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			mgr := NewMigrationManager(nil, zaptest.NewLogger(t), dir, nil, nil).(*MigrationManager)
+			if _, err := mgr.ListMigrationFiles(); err == nil {
+				t.Errorf("expected error for %v", files)
+			}
+		})
+	}
+}

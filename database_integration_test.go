@@ -2211,3 +2211,69 @@ func TestDatabase_MigrationFiles_ApplyToAllTenantsFromFile(t *testing.T) {
 		t.Errorf("ListMigrationFiles = %v, %v; want [002_create_gizmos]", files, err)
 	}
 }
+
+func TestDatabase_ApplyPending_AppliesFilesInOrderAndIsIdempotent(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	_, mm, ids, dir := fileMigrationEnv(t, tdb, 1)
+	ctx := context.Background()
+	writeMigrationFiles(t, dir, "002", "add_col", "ALTER TABLE things ADD COLUMN note TEXT", "")
+	writeMigrationFiles(t, dir, "001", "create_things", "CREATE TABLE things (id SERIAL PRIMARY KEY)", "DROP TABLE things")
+
+	if err := mm.ApplyPending(ctx, ids[0]); err != nil {
+		t.Fatalf("ApplyPending: %v", err)
+	}
+	applied, _ := mm.GetAppliedMigrations(ctx, ids[0])
+	if len(applied) != 2 || applied[0].Version != "001" || applied[1].Version != "002" {
+		t.Fatalf("expected 001 then 002, got %+v", applied)
+	}
+
+	// Second run applies nothing new.
+	if err := mm.ApplyPending(ctx, ids[0]); err != nil {
+		t.Fatalf("second ApplyPending: %v", err)
+	}
+	if applied, _ = mm.GetAppliedMigrations(ctx, ids[0]); len(applied) != 2 {
+		t.Errorf("re-run should not add records, got %d", len(applied))
+	}
+
+	// A file added later is picked up.
+	writeMigrationFiles(t, dir, "003", "add_more", "ALTER TABLE things ADD COLUMN more TEXT", "")
+	if err := mm.ApplyPending(ctx, ids[0]); err != nil {
+		t.Fatalf("third ApplyPending: %v", err)
+	}
+	if ok, _ := mm.IsMigrationApplied(ctx, ids[0], "003"); !ok {
+		t.Errorf("003 should be applied")
+	}
+}
+
+func TestDatabase_ApplyPendingToAllTenants_BringsOlderTenantUpToDate(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, mm, ids, dir := fileMigrationEnv(t, tdb, 2)
+	ctx := context.Background()
+	writeMigrationFiles(t, dir, "001", "create_things", "CREATE TABLE things (id SERIAL PRIMARY KEY)", "")
+	if err := mm.ApplyPending(ctx, ids[0]); err != nil { // only the first tenant is current
+		t.Fatalf("ApplyPending: %v", err)
+	}
+	if err := mt.Manager.SuspendTenant(ctx, ids[1]); err != nil {
+		t.Fatal(err)
+	}
+	third := uuid.New()
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: third, Name: "third", Subdomain: "third-" + third.String()[:8]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cleanupTestData(tdb.db, []uuid.UUID{third}) })
+
+	if err := mm.ApplyPendingToAllTenants(ctx); err != nil {
+		t.Fatalf("ApplyPendingToAllTenants: %v", err)
+	}
+	if ok, _ := mm.IsMigrationApplied(ctx, third, "001"); !ok {
+		t.Errorf("active tenant should have been migrated")
+	}
+	if ok, _ := mm.IsMigrationApplied(ctx, ids[1], "001"); ok {
+		t.Errorf("suspended tenant must not be migrated")
+	}
+}

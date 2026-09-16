@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -98,42 +99,9 @@ func (m *MigrationManager) ApplyToAllTenants(ctx context.Context, migration *ten
 	m.logger.Info("Applying migration to all active tenants",
 		zap.String("migration_version", migration.Version),
 		zap.String("migration_name", migration.Name))
-
-	var errs []error
-	applied := 0
-	const perPage = 100
-	for page := 1; ; page++ {
-		tenants, _, err := m.repository.List(ctx, page, perPage)
-		if err != nil {
-			return fmt.Errorf("failed to list tenants: %w", err)
-		}
-		for _, t := range tenants {
-			if t.Status != tenant.StatusActive {
-				continue
-			}
-			if err := m.ApplyMigration(ctx, t.ID, migration); err != nil {
-				errs = append(errs, err)
-				continue
-			}
-			applied++
-		}
-		if len(tenants) < perPage {
-			break
-		}
-	}
-
-	if len(errs) > 0 {
-		m.logger.Error("Bulk migration completed with errors",
-			zap.String("migration_version", migration.Version),
-			zap.Int("succeeded", applied),
-			zap.Int("failed", len(errs)))
-		return fmt.Errorf("migration %s failed for %d tenant(s): %w", migration.Version, len(errs), errors.Join(errs...))
-	}
-
-	m.logger.Info("Migration applied to all active tenants",
-		zap.String("migration_version", migration.Version),
-		zap.Int("count", applied))
-	return nil
+	return m.forEachActiveTenant(ctx, "migration "+migration.Version, func(t *tenant.Tenant) error {
+		return m.ApplyMigration(ctx, t.ID, migration)
+	})
 }
 
 // RollbackMigration runs the stored rollback SQL for a migration and removes its record.
@@ -303,31 +271,118 @@ func (m *MigrationManager) ApplyMigrationToAllTenantsFromFile(ctx context.Contex
 	return m.ApplyToAllTenants(ctx, migration)
 }
 
-// ListMigrationFiles returns all available migration files
-func (m *MigrationManager) ListMigrationFiles() ([]string, error) {
-	if m.migrationsDir == "" {
-		return nil, fmt.Errorf("migrations directory not configured")
-	}
+// migrationFile is one parsed <version>_<name>.up.sql entry.
+type migrationFile struct {
+	Version string
+	Name    string
+}
 
-	files, err := os.ReadDir(m.migrationsDir)
+func (f migrationFile) base() string { return f.Version + "_" + f.Name }
+
+// migrationFiles returns the migrations in migrationsDir sorted by filename.
+// An empty migrationsDir yields no files and no error.
+func (m *MigrationManager) migrationFiles() ([]migrationFile, error) {
+	if m.migrationsDir == "" {
+		return nil, nil
+	}
+	entries, err := os.ReadDir(m.migrationsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read migrations directory: %w", err)
 	}
 
-	var migrations []string
-	seen := make(map[string]bool)
-	for _, file := range files {
-		if file.IsDir() {
+	var files []migrationFile
+	ups := make(map[string]bool)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
 		}
-		name := file.Name()
-		if strings.HasSuffix(name, ".up.sql") {
-			baseName := strings.TrimSuffix(name, ".up.sql")
-			if !seen[baseName] {
-				migrations = append(migrations, baseName)
-				seen[baseName] = true
-			}
+		base := strings.TrimSuffix(e.Name(), ".up.sql")
+		version, name, ok := strings.Cut(base, "_")
+		if !ok || version == "" || name == "" {
+			return nil, fmt.Errorf("migration file %q must be named <version>_<name>.up.sql", e.Name())
+		}
+		files = append(files, migrationFile{Version: version, Name: name})
+		ups[base] = true
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".down.sql") {
+			continue
+		}
+		if base := strings.TrimSuffix(e.Name(), ".down.sql"); !ups[base] {
+			return nil, fmt.Errorf("rollback file %q has no matching .up.sql", e.Name())
 		}
 	}
-	return migrations, nil
+	sort.Slice(files, func(i, j int) bool { return files[i].base() < files[j].base() })
+	return files, nil
+}
+
+// ListMigrationFiles returns "<version>_<name>" for every migration file, sorted by filename.
+func (m *MigrationManager) ListMigrationFiles() ([]string, error) {
+	if m.migrationsDir == "" {
+		return nil, fmt.Errorf("migrations directory not configured")
+	}
+	files, err := m.migrationFiles()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(files))
+	for _, f := range files {
+		out = append(out, f.base())
+	}
+	return out, nil
+}
+
+// ApplyPending applies every migration file not yet recorded for the tenant, in order.
+func (m *MigrationManager) ApplyPending(ctx context.Context, tenantID uuid.UUID) error {
+	files, err := m.migrationFiles()
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		if err := m.ApplyMigrationFromFile(ctx, tenantID, f.Version, f.Name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ApplyPendingToAllTenants runs ApplyPending for every active tenant and reports all failures.
+func (m *MigrationManager) ApplyPendingToAllTenants(ctx context.Context) error {
+	return m.forEachActiveTenant(ctx, "pending migrations", func(t *tenant.Tenant) error {
+		return m.ApplyPending(ctx, t.ID)
+	})
+}
+
+// forEachActiveTenant pages through active tenants, applies fn to each, and
+// returns a joined error naming every tenant that failed.
+func (m *MigrationManager) forEachActiveTenant(ctx context.Context, what string, fn func(*tenant.Tenant) error) error {
+	var errs []error
+	applied := 0
+	const perPage = 100
+	for page := 1; ; page++ {
+		tenants, _, err := m.repository.List(ctx, page, perPage)
+		if err != nil {
+			return fmt.Errorf("failed to list tenants: %w", err)
+		}
+		for _, t := range tenants {
+			if t.Status != tenant.StatusActive {
+				continue
+			}
+			if err := fn(t); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			applied++
+		}
+		if len(tenants) < perPage {
+			break
+		}
+	}
+	if len(errs) > 0 {
+		m.logger.Error("Bulk operation completed with errors",
+			zap.String("operation", what), zap.Int("succeeded", applied), zap.Int("failed", len(errs)))
+		return fmt.Errorf("%s failed for %d tenant(s): %w", what, len(errs), errors.Join(errs...))
+	}
+	m.logger.Info("Bulk operation applied to all active tenants", zap.String("operation", what), zap.Int("count", applied))
+	return nil
 }

@@ -254,6 +254,11 @@ func (m *MockMigrationManager) ApplyToAllTenants(ctx context.Context, migration 
 	return nil
 }
 
+func (m *MockMigrationManager) ApplyPending(ctx context.Context, tenantID uuid.UUID) error {
+	return nil
+}
+func (m *MockMigrationManager) ApplyPendingToAllTenants(ctx context.Context) error { return nil }
+
 func (m *MockMigrationManager) GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*tenant.Migration, error) {
 	migrations := m.appliedMigrations[tenantID]
 	if migrations == nil {

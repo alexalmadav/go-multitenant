@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/database/postgres"
@@ -32,6 +33,13 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	logger, err := setupLogger(config.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup logger: %w", err)
+	}
+
+	// Validate the migrations directory early so a typo is visible at startup.
+	if dir := config.Database.MigrationsDir; dir == "" {
+		logger.Warn("MigrationsDir is not set; newly provisioned tenants will have an empty schema")
+	} else if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("migrations directory %q is not a directory: %w", dir, err)
 	}
 
 	// Setup database connection

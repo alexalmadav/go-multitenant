@@ -86,6 +86,11 @@ type MigrationManager interface {
 	ApplyMigration(ctx context.Context, tenantID uuid.UUID, migration *Migration) error
 	RollbackMigration(ctx context.Context, tenantID uuid.UUID, version string) error
 	ApplyToAllTenants(ctx context.Context, migration *Migration) error
+	// ApplyPending applies every migration file in MigrationsDir that has not
+	// been recorded for the tenant, in filename order.
+	ApplyPending(ctx context.Context, tenantID uuid.UUID) error
+	// ApplyPendingToAllTenants runs ApplyPending for every active tenant.
+	ApplyPendingToAllTenants(ctx context.Context) error
 	GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*Migration, error)
 	IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error)
 }

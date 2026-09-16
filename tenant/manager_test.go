@@ -846,6 +846,9 @@ func NewMockMigrationManager() *MockManagerMigrationManager {
 // MockManagerMigrationManager implements MigrationManager interface for testing
 type MockManagerMigrationManager struct {
 	appliedMigrations map[uuid.UUID]map[string]*Migration
+	// applyPendingErr, when set, is returned once by ApplyPending and then cleared.
+	applyPendingErr   error
+	applyPendingCalls int
 }
 
 func (m *MockManagerMigrationManager) ApplyMigration(ctx context.Context, tenantID uuid.UUID, migration *Migration) error {
@@ -883,6 +886,18 @@ func (m *MockManagerMigrationManager) ApplyToAllTenants(ctx context.Context, mig
 	}
 	return nil
 }
+
+// applyPendingErr, when set, is returned once by ApplyPending and then cleared.
+func (m *MockManagerMigrationManager) ApplyPending(ctx context.Context, tenantID uuid.UUID) error {
+	m.applyPendingCalls++
+	if m.applyPendingErr != nil {
+		err := m.applyPendingErr
+		m.applyPendingErr = nil
+		return err
+	}
+	return nil
+}
+func (m *MockManagerMigrationManager) ApplyPendingToAllTenants(ctx context.Context) error { return nil }
 
 func (m *MockManagerMigrationManager) GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*Migration, error) {
 	migrations := m.appliedMigrations[tenantID]
