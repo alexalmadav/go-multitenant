@@ -31,6 +31,9 @@ type Manager interface {
 	LimitChecker() LimitChecker
 	GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error)
 
+	// RegisterHook adds a lifecycle hook. Hooks run in registration order.
+	RegisterHook(h Hook)
+
 	// Database operations
 	//
 	// GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.

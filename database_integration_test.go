@@ -2567,3 +2567,42 @@ func TestDatabase_Metadata_ColumnIsAddedToPreExistingTenantsTable(t *testing.T) 
 		t.Errorf("metadata column should have been added, exists=%v err=%v", exists, err)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle hooks against a real database
+// ---------------------------------------------------------------------------
+
+type stampingHook struct {
+	tenant.BaseHook
+	mgr tenant.Manager
+}
+
+func (h *stampingHook) Name() string { return "stamper" }
+func (h *stampingHook) OnTenantProvisioned(ctx context.Context, t *tenant.Tenant) error {
+	t.Metadata.SetString("provisioned_by", "stamper")
+	return h.mgr.UpdateTenant(ctx, t)
+}
+
+func TestDatabase_Hooks_ProvisionedHookCanPersistMetadata(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, _ := migrationTestEnv(t, tdb, 0)
+	mt.Manager.RegisterHook(&stampingHook{mgr: mt.Manager})
+	ctx := context.Background()
+
+	id := uuid.New()
+	t.Cleanup(func() { cleanupTestData(tdb.db, []uuid.UUID{id}) })
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: id, Name: "h", Subdomain: "hook-" + id.String()[:8]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatalf("ProvisionTenant: %v", err)
+	}
+	got, _ := mt.Manager.GetTenant(ctx, id)
+	if v, _ := got.Metadata.GetString("provisioned_by"); v != "stamper" {
+		t.Errorf("hook-written metadata not persisted: %v", got.Metadata)
+	}
+	if got.Status != tenant.StatusActive {
+		t.Errorf("status = %s", got.Status)
+	}
+}

@@ -466,8 +466,14 @@ func TestManager_SuspendTenant(t *testing.T) {
 		return
 	}
 
-	// Verify tenant status was updated
-	if tenant.Status != StatusSuspended {
+	// Verify tenant status was updated. Read back through GetTenant rather
+	// than the original pointer: the mock repository stores/returns copies,
+	// so SuspendTenant's write does not mutate the caller's struct.
+	updated, err := manager.GetTenant(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("GetTenant() error = %v", err)
+	}
+	if updated.Status != StatusSuspended {
 		t.Error("SuspendTenant() should set status to suspended")
 	}
 }
@@ -503,8 +509,14 @@ func TestManager_ActivateTenant(t *testing.T) {
 		return
 	}
 
-	// Verify tenant status was updated
-	if tenant.Status != StatusActive {
+	// Verify tenant status was updated. Read back through GetTenant rather
+	// than the original pointer: the mock repository stores/returns copies,
+	// so ActivateTenant's write does not mutate the caller's struct.
+	updated, err := manager.GetTenant(context.Background(), tenantID)
+	if err != nil {
+		t.Fatalf("GetTenant() error = %v", err)
+	}
+	if updated.Status != StatusActive {
 		t.Error("ActivateTenant() should set status to active")
 	}
 }
@@ -723,26 +735,20 @@ type MockManagerRepository struct {
 
 func (m *MockManagerRepository) Create(ctx context.Context, t *Tenant) error {
 	if _, exists := m.tenants[t.ID]; exists {
-		return &TenantError{TenantID: t.ID, Code: "DUPLICATE", Message: "tenant already exists"}
+		return errors.New("duplicate id")
 	}
-	for _, existing := range m.tenants {
-		if existing.Subdomain == t.Subdomain {
-			return &TenantError{TenantID: t.ID, Code: "DUPLICATE_SUBDOMAIN", Message: "subdomain already exists"}
-		}
-	}
-	now := time.Now()
-	t.CreatedAt = now
-	t.UpdatedAt = now
-	m.tenants[t.ID] = t
+	copied := *t
+	m.tenants[t.ID] = &copied
 	return nil
 }
 
 func (m *MockManagerRepository) GetByID(ctx context.Context, id uuid.UUID) (*Tenant, error) {
-	t, exists := m.tenants[id]
-	if !exists {
-		return nil, &TenantError{TenantID: id, Code: "NOT_FOUND", Message: "tenant not found"}
+	t, ok := m.tenants[id]
+	if !ok {
+		return nil, errors.New("tenant not found")
 	}
-	return t, nil
+	copied := *t
+	return &copied, nil
 }
 
 func (m *MockManagerRepository) GetBySubdomain(ctx context.Context, subdomain string) (*Tenant, error) {
@@ -755,31 +761,20 @@ func (m *MockManagerRepository) GetBySubdomain(ctx context.Context, subdomain st
 }
 
 func (m *MockManagerRepository) Update(ctx context.Context, t *Tenant) error {
-	existing, exists := m.tenants[t.ID]
-	if !exists {
-		return &TenantError{TenantID: t.ID, Code: "NOT_FOUND", Message: "tenant not found"}
+	if _, ok := m.tenants[t.ID]; !ok {
+		return errors.New("tenant not found")
 	}
-
-	// Check for duplicate subdomain (excluding self)
-	for id, other := range m.tenants {
-		if id != t.ID && other.Subdomain == t.Subdomain {
-			return &TenantError{TenantID: t.ID, Code: "DUPLICATE_SUBDOMAIN", Message: "subdomain already exists"}
-		}
-	}
-
-	t.CreatedAt = existing.CreatedAt
-	t.UpdatedAt = time.Now()
-	m.tenants[t.ID] = t
+	copied := *t
+	m.tenants[t.ID] = &copied
 	return nil
 }
 
 func (m *MockManagerRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	t, exists := m.tenants[id]
-	if !exists {
-		return &TenantError{TenantID: id, Code: "NOT_FOUND", Message: "tenant not found"}
+	t, ok := m.tenants[id]
+	if !ok {
+		return errors.New("tenant not found")
 	}
 	t.Status = StatusCancelled
-	t.UpdatedAt = time.Now()
 	return nil
 }
 

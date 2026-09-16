@@ -3,8 +3,10 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -20,6 +22,9 @@ type manager struct {
 	limitChecker  LimitChecker
 	logger        *zap.Logger
 	connections   map[uuid.UUID]*sql.DB // Tenant-specific connections
+
+	hooksMu sync.RWMutex
+	hooks   []Hook
 }
 
 // NewManager creates a new tenant manager
@@ -34,6 +39,47 @@ func NewManager(config Config, db *sql.DB, repository Repository, schemaManager 
 		logger:        logger.Named("tenant_manager"),
 		connections:   make(map[uuid.UUID]*sql.DB),
 	}
+}
+
+// RegisterHook adds a lifecycle hook. Safe to call while requests are running.
+func (m *manager) RegisterHook(h Hook) {
+	m.hooksMu.Lock()
+	defer m.hooksMu.Unlock()
+	m.hooks = append(m.hooks, h)
+}
+
+// snapshotHooks returns the registered hooks in order.
+func (m *manager) snapshotHooks() []Hook {
+	m.hooksMu.RLock()
+	defer m.hooksMu.RUnlock()
+	return append([]Hook(nil), m.hooks...)
+}
+
+// validateMetadataHooks runs ValidateMetadata on every hook; the first error blocks the write.
+func (m *manager) validateMetadataHooks(ctx context.Context, t *Tenant) error {
+	for _, h := range m.snapshotHooks() {
+		if err := h.ValidateMetadata(ctx, t); err != nil {
+			return &ValidationError{Field: "metadata", Message: fmt.Sprintf("%s: %v", h.Name(), err)}
+		}
+	}
+	return nil
+}
+
+// runHooks calls fn for every hook, collects failures, and returns a HookError
+// if any failed. Every hook runs even when an earlier one fails.
+func (m *manager) runHooks(event string, fn func(Hook) error) error {
+	var errs []error
+	for _, h := range m.snapshotHooks() {
+		if err := fn(h); err != nil {
+			m.logger.Error("Lifecycle hook failed",
+				zap.String("event", event), zap.String("hook", h.Name()), zap.Error(err))
+			errs = append(errs, fmt.Errorf("%s: %w", h.Name(), err))
+		}
+	}
+	if len(errs) > 0 {
+		return &HookError{Event: event, Errors: errs}
+	}
+	return nil
 }
 
 // CreateTenant creates a new tenant
@@ -58,6 +104,13 @@ func (m *manager) CreateTenant(ctx context.Context, tenant *Tenant) error {
 	if tenant.PlanType == "" {
 		tenant.PlanType = PlanBasic
 	}
+	if tenant.Metadata == nil {
+		tenant.Metadata = TenantMetadata{}
+	}
+
+	if err := m.validateMetadataHooks(ctx, tenant); err != nil {
+		return err
+	}
 
 	// Create tenant record
 	if err := m.repository.Create(ctx, tenant); err != nil {
@@ -69,7 +122,7 @@ func (m *manager) CreateTenant(ctx context.Context, tenant *Tenant) error {
 		zap.String("name", tenant.Name),
 		zap.String("subdomain", tenant.Subdomain))
 
-	return nil
+	return m.runHooks("created", func(h Hook) error { return h.OnTenantCreated(ctx, tenant) })
 }
 
 // GetTenant retrieves a tenant by ID
@@ -87,13 +140,44 @@ func (m *manager) UpdateTenant(ctx context.Context, tenant *Tenant) error {
 	if err := m.validateTenant(tenant); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
+	if tenant.Metadata == nil {
+		tenant.Metadata = TenantMetadata{}
+	}
+	if err := m.validateMetadataHooks(ctx, tenant); err != nil {
+		return err
+	}
 
-	return m.repository.Update(ctx, tenant)
+	before, err := m.repository.GetByID(ctx, tenant.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get tenant: %w", err)
+	}
+	if err := m.repository.Update(ctx, tenant); err != nil {
+		return err
+	}
+
+	var errs []error
+	if err := m.runHooks("updated", func(h Hook) error { return h.OnTenantUpdated(ctx, before, tenant) }); err != nil {
+		errs = append(errs, err)
+	}
+	if before.Status != tenant.Status {
+		if err := m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, before.Status) }); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // DeleteTenant soft deletes a tenant
 func (m *manager) DeleteTenant(ctx context.Context, id uuid.UUID) error {
-	return m.repository.Delete(ctx, id)
+	tenant, err := m.repository.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to get tenant: %w", err)
+	}
+	if err := m.repository.Delete(ctx, id); err != nil {
+		return err
+	}
+	tenant.Status = StatusCancelled
+	return m.runHooks("deleted", func(h Hook) error { return h.OnTenantDeleted(ctx, tenant) })
 }
 
 // ListTenants lists tenants with pagination
@@ -110,6 +194,7 @@ func (m *manager) ProvisionTenant(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
+	previous := tenant.Status
 	if tenant.Status == StatusCancelled {
 		return fmt.Errorf("cannot provision cancelled tenant %s", id)
 	}
@@ -133,7 +218,15 @@ func (m *manager) ProvisionTenant(ctx context.Context, id uuid.UUID) error {
 	m.logger.Info("Successfully provisioned tenant",
 		zap.String("tenant_id", id.String()),
 		zap.String("name", tenant.Name))
-	return nil
+
+	var errs []error
+	if err := m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) }); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.runHooks("provisioned", func(h Hook) error { return h.OnTenantProvisioned(ctx, tenant) }); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // SuspendTenant suspends a tenant
@@ -143,6 +236,7 @@ func (m *manager) SuspendTenant(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
 
+	previous := tenant.Status
 	tenant.Status = StatusSuspended
 	if err := m.repository.Update(ctx, tenant); err != nil {
 		return fmt.Errorf("failed to suspend tenant: %w", err)
@@ -151,7 +245,10 @@ func (m *manager) SuspendTenant(ctx context.Context, id uuid.UUID) error {
 	m.logger.Info("Suspended tenant",
 		zap.String("tenant_id", id.String()))
 
-	return nil
+	if previous == StatusSuspended {
+		return nil
+	}
+	return m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) })
 }
 
 // ActivateTenant activates a tenant
@@ -161,6 +258,7 @@ func (m *manager) ActivateTenant(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
 
+	previous := tenant.Status
 	tenant.Status = StatusActive
 	if err := m.repository.Update(ctx, tenant); err != nil {
 		return fmt.Errorf("failed to activate tenant: %w", err)
@@ -169,7 +267,10 @@ func (m *manager) ActivateTenant(ctx context.Context, id uuid.UUID) error {
 	m.logger.Info("Activated tenant",
 		zap.String("tenant_id", id.String()))
 
-	return nil
+	if previous == StatusActive {
+		return nil
+	}
+	return m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) })
 }
 
 // ValidateAccess validates if a user has access to a tenant

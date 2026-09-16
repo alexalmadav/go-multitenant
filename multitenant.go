@@ -200,6 +200,10 @@ type (
 
 	TenantError     = tenant.TenantError
 	ValidationError = tenant.ValidationError
+
+	Hook      = tenant.Hook
+	BaseHook  = tenant.BaseHook
+	HookError = tenant.HookError
 )
 
 // Re-export key constants

@@ -344,6 +344,8 @@ func (m *MockMultiTenantManager) Close() error {
 	return nil
 }
 
+func (m *MockMultiTenantManager) RegisterHook(h tenant.Hook) {}
+
 type MockMultiTenantResolver struct{}
 
 func (m *MockMultiTenantResolver) ResolveTenant(ctx context.Context, req *http.Request) (uuid.UUID, error) {
