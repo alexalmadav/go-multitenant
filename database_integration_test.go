@@ -2518,7 +2518,13 @@ func TestDatabase_Metadata_RoundTripsThroughRepositoryAndFindByMetadata(t *testi
 
 func TestDatabase_Metadata_ColumnIsAddedToPreExistingTenantsTable(t *testing.T) {
 	tdb := newTestDB(t)
-	defer tdb.close()
+	// Registered via t.Cleanup (instead of the usual defer tdb.close()) so we
+	// can register a second cleanup below that is guaranteed to run first:
+	// t.Cleanup callbacks fire in last-registered-first-called order, and all
+	// only after the test function (and its own defers) has returned, so a
+	// plain "defer tdb.close()" here would already have closed tdb.db by the
+	// time any t.Cleanup ran.
+	t.Cleanup(tdb.close)
 	connStr := tdb.getConnectionString()
 	if connStr == "" {
 		t.Skip("No connection string available")
@@ -2535,6 +2541,18 @@ func TestDatabase_Metadata_ColumnIsAddedToPreExistingTenantsTable(t *testing.T) 
 		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`); err != nil {
 		t.Fatal(err)
 	}
+	// This stand-in table is deliberately missing chk_plan_type/chk_status (a
+	// faithful "older version" simulation). Drop it once the test is done so
+	// the next test's New() -> CreateMasterTables (CREATE TABLE IF NOT
+	// EXISTS, a no-op against a table that already exists) rebuilds the real
+	// public.tenants with its constraints, instead of leaving the shared
+	// database permanently degraded. Registered after t.Cleanup(tdb.close)
+	// above so it runs first, while tdb.db is still open.
+	t.Cleanup(func() {
+		if _, err := tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`); err != nil {
+			t.Errorf("failed to restore public.tenants after test: %v", err)
+		}
+	})
 
 	mt, err := New(testConfig(connStr))
 	if err != nil {
