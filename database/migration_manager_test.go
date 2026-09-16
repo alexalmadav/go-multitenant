@@ -316,9 +316,10 @@ func TestMigrationManager_ListMigrationFiles_SortedByFilename(t *testing.T) {
 
 func TestMigrationManager_ListMigrationFiles_RejectsBadNames(t *testing.T) {
 	cases := map[string][]string{
-		"no underscore":    {"001.up.sql"},
-		"empty name":       {"001_.up.sql"},
-		"orphan down file": {"001_first.down.sql"},
+		"no underscore":     {"001.up.sql"},
+		"empty name":        {"001_.up.sql"},
+		"orphan down file":  {"001_first.down.sql"},
+		"duplicate version": {"003_a.up.sql", "003_b.up.sql"},
 	}
 	for name, files := range cases {
 		t.Run(name, func(t *testing.T) {

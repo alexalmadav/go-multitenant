@@ -34,6 +34,16 @@ func TestTenantMetadata_ScanNilYieldsEmptyMap(t *testing.T) {
 	}
 }
 
+func TestTenantMetadata_ScanJSONNullYieldsEmptyMap(t *testing.T) {
+	var out TenantMetadata
+	if err := out.Scan([]byte("null")); err != nil {
+		t.Fatalf("Scan([]byte(\"null\")): %v", err)
+	}
+	if out == nil {
+		t.Fatal("Scan of JSON null should leave a non-nil empty map")
+	}
+}
+
 func TestTenantMetadata_NilValueIsEmptyObject(t *testing.T) {
 	var m TenantMetadata
 	v, err := m.Value()
@@ -41,9 +51,7 @@ func TestTenantMetadata_NilValueIsEmptyObject(t *testing.T) {
 		t.Fatal(err)
 	}
 	if s, ok := v.(string); !ok || s != "{}" {
-		if b, ok := v.([]byte); !ok || string(b) != "{}" {
-			t.Errorf("nil metadata should serialize as {}, got %v", v)
-		}
+		t.Errorf("nil metadata should serialize as the string \"{}\" (simple protocol requires a string, not []byte), got %#v", v)
 	}
 }
 

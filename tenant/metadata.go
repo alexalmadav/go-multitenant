@@ -50,7 +50,13 @@ func (tm *TenantMetadata) Scan(value interface{}) error {
 		return errors.New("cannot scan non-string/[]byte into TenantMetadata")
 	}
 
-	return json.Unmarshal(bytes, tm)
+	if err := json.Unmarshal(bytes, tm); err != nil {
+		return err
+	}
+	if *tm == nil {
+		*tm = make(TenantMetadata)
+	}
+	return nil
 }
 
 // GetString safely gets a string value from metadata

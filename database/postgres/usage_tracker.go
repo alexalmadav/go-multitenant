@@ -55,7 +55,7 @@ func (u *UsageTracker) GetCurrentUsage(ctx context.Context, tenantID uuid.UUID, 
 		return nil, nil
 	}
 	schema := u.schemaManager.GetSchemaName(tenantID)
-	query := fmt.Sprintf(`SELECT COUNT(*) FROM "%s".%s`, schema, table)
+	query := fmt.Sprintf(`SELECT COUNT(*) FROM "%s"."%s"`, schema, table)
 
 	var n int
 	if err := u.db.QueryRowContext(ctx, query).Scan(&n); err != nil {

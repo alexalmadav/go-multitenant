@@ -38,8 +38,10 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Validate the migrations directory early so a typo is visible at startup.
 	if dir := config.Database.MigrationsDir; dir == "" {
 		logger.Warn("MigrationsDir is not set; newly provisioned tenants will have an empty schema")
-	} else if info, err := os.Stat(dir); err != nil || !info.IsDir() {
-		return nil, fmt.Errorf("migrations directory %q is not a directory: %w", dir, err)
+	} else if info, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("migrations directory %q: %w", dir, err)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("migrations directory %q is not a directory", dir)
 	}
 
 	// Setup database connection
@@ -51,9 +53,13 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Create repository
 	repository := postgres.NewRepository(db, logger)
 
-	// Create master tables
+	// Create master tables. This also runs the v0.6 -> v0.7 metadata-column
+	// upgrade (ALTER TABLE ... ADD COLUMN IF NOT EXISTS metadata); failing
+	// here silently would leave a *MultiTenant whose every tenant read fails,
+	// so treat it as fatal rather than logging and continuing.
 	if err := repository.CreateMasterTables(context.Background()); err != nil {
-		logger.Warn("Failed to create master tables - they may already exist", zap.Error(err))
+		db.Close()
+		return nil, fmt.Errorf("failed to create master tables: %w", err)
 	}
 
 	// Create schema manager

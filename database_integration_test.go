@@ -2568,6 +2568,61 @@ func TestDatabase_Metadata_ColumnIsAddedToPreExistingTenantsTable(t *testing.T) 
 	}
 }
 
+func TestNew_FailsWhenMasterTablesCannotBeCreated(t *testing.T) {
+	tdb := newTestDB(t)
+	// Registered via t.Cleanup (instead of the usual defer tdb.close()) so we
+	// can register a second cleanup below that is guaranteed to run first,
+	// following the same ordering pattern as
+	// TestDatabase_Metadata_ColumnIsAddedToPreExistingTenantsTable.
+	t.Cleanup(tdb.close)
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	// Replace public.tenant_migrations with a VIEW. CreateMasterTables'
+	// "CREATE TABLE IF NOT EXISTS public.tenant_migrations" is then a no-op
+	// (a relation with that name already exists), but the later
+	// "CREATE INDEX ... ON public.tenant_migrations(tenant_id)" fails: you
+	// cannot create a plain index on a view. That makes CreateMasterTables
+	// fail deterministically without touching public.tenants.
+	if _, err := tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tdb.db.Exec(`CREATE VIEW public.tenant_migrations AS SELECT 1 AS tenant_id`); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the real table once the test is done so later tests see the
+	// schema they expect. Registered after t.Cleanup(tdb.close) above so it
+	// runs first, while tdb.db is still open.
+	t.Cleanup(func() {
+		if _, err := tdb.db.Exec(`DROP VIEW IF EXISTS public.tenant_migrations`); err != nil {
+			t.Errorf("failed to drop stand-in view after test: %v", err)
+		}
+		if _, err := tdb.db.Exec(`CREATE TABLE IF NOT EXISTS public.tenant_migrations (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			tenant_id UUID NOT NULL,
+			version VARCHAR(50) NOT NULL,
+			name VARCHAR(255) NOT NULL,
+			applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+			rollback_sql TEXT,
+			checksum VARCHAR(64),
+			FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE,
+			UNIQUE(tenant_id, version)
+		)`); err != nil {
+			t.Errorf("failed to restore public.tenant_migrations after test: %v", err)
+		}
+	})
+
+	mt, err := New(testConfig(connStr))
+	if err == nil {
+		mt.Close()
+		t.Fatal("New() should fail when master tables cannot be created")
+	}
+	if !strings.Contains(err.Error(), "master tables") {
+		t.Errorf("error should mention master tables, got: %v", err)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle hooks against a real database
 // ---------------------------------------------------------------------------

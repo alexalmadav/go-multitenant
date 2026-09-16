@@ -21,7 +21,6 @@ type manager struct {
 	migrationMgr  MigrationManager
 	limitChecker  LimitChecker
 	logger        *zap.Logger
-	connections   map[uuid.UUID]*sql.DB // Tenant-specific connections
 
 	hooksMu sync.RWMutex
 	hooks   []Hook
@@ -37,7 +36,6 @@ func NewManager(config Config, db *sql.DB, repository Repository, schemaManager 
 		migrationMgr:  migrationMgr,
 		limitChecker:  limitChecker,
 		logger:        logger.Named("tenant_manager"),
-		connections:   make(map[uuid.UUID]*sql.DB),
 	}
 }
 
@@ -459,15 +457,6 @@ func (m *manager) WithTenantContext(ctx context.Context, tenantID uuid.UUID) con
 
 // Close closes all resources
 func (m *manager) Close() error {
-	// Close any tenant-specific connections
-	for tenantID, conn := range m.connections {
-		if err := conn.Close(); err != nil {
-			m.logger.Error("Failed to close tenant connection",
-				zap.String("tenant_id", tenantID.String()),
-				zap.Error(err))
-		}
-	}
-
 	return nil
 }
 

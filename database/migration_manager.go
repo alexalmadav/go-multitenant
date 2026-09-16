@@ -292,6 +292,7 @@ func (m *MigrationManager) migrationFiles() ([]migrationFile, error) {
 
 	var files []migrationFile
 	ups := make(map[string]bool)
+	seenVersions := make(map[string]string) // version -> the file that first claimed it
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".up.sql") {
 			continue
@@ -301,6 +302,10 @@ func (m *MigrationManager) migrationFiles() ([]migrationFile, error) {
 		if !ok || version == "" || name == "" {
 			return nil, fmt.Errorf("migration file %q must be named <version>_<name>.up.sql", e.Name())
 		}
+		if first, ok := seenVersions[version]; ok {
+			return nil, fmt.Errorf("duplicate migration version %q: %s and %s", version, first, e.Name())
+		}
+		seenVersions[version] = e.Name()
 		files = append(files, migrationFile{Version: version, Name: name})
 		ups[base] = true
 	}

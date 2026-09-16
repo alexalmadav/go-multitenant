@@ -39,6 +39,16 @@ If `MigrationsDir` is empty or unset, `New` logs a warning once and every
 provisioned tenant gets an empty schema. A configured directory that does not
 exist is an error from `New`.
 
+### `search_path` inside a migration
+
+Each migration file runs in a transaction with `search_path` set to only the
+tenant schema — `public` is deliberately not on it. This means anything that
+actually lives in `public`, including functions provided by an extension such
+as `uuid-ossp`'s `uuid_generate_v4()`, must be schema-qualified in your SQL:
+write `public.uuid_generate_v4()`, not `uuid_generate_v4()`. `gen_random_uuid()`
+works unqualified because it lives in `pg_catalog`, which is always on the
+search path.
+
 ### Provisioning and `ApplyPending`
 
 ```go
@@ -164,17 +174,24 @@ through whatever `Repository` your application holds, or through a custom
 ### Indexing
 
 The repository creates a GIN index on the whole `metadata` column
-(`idx_tenants_metadata ON public.tenants USING GIN (metadata)`). A GIN index
-on the JSONB column covers `metadata ->> 'any_key' = value` lookups for any
-key without a separate index per key — `FindByMetadata` benefits from it
-regardless of which key you query. Add a dedicated B-tree expression index
-only if a specific key is queried heavily enough that you've measured the GIN
-index isn't fast enough for it:
+(`idx_tenants_metadata ON public.tenants USING GIN (metadata)`). A default
+(`jsonb_ops`) GIN index on a JSONB column only serves containment and
+key-existence queries — `@>`, `?`, `?|`, `?&`, and jsonpath operators. It does
+**not** serve `FindByMetadata`: that query is `WHERE metadata ->> $1 = $2`,
+text equality on one extracted key, which the GIN index cannot answer, so it
+is a sequential scan over `public.tenants` regardless of how many tenants
+exist. If you query one key often enough for that to matter, add a B-tree
+expression index for that specific key:
 
 ```sql
 CREATE INDEX idx_tenants_stripe_customer
-ON public.tenants USING BTREE ((metadata ->> 'stripe_customer_id'));
+ON public.tenants ((metadata ->> 'stripe_customer_id'));
 ```
+
+That index is used only for lookups on `stripe_customer_id` — add one per key
+you query this way. The GIN index remains useful if you also query with `@>`
+or `?` directly (not currently done by anything in this library, but
+available to application code with direct repository/database access).
 
 ## Lifecycle hooks
 
@@ -214,8 +231,8 @@ with request handling — a mutex guards the hook slice.
 | `CreateTenant`      | `ValidateMetadata`     | `OnTenantCreated`                               |
 | `ProvisionTenant`   |                      | `OnTenantStatusChanged` and `OnTenantProvisioned`, only when the tenant transitions to `active`; a re-run on an already-active tenant fires nothing |
 | `UpdateTenant`      | `ValidateMetadata`     | `OnTenantUpdated`; `OnTenantStatusChanged` if status differs |
-| `SuspendTenant`     |                      | `OnTenantStatusChanged`                         |
-| `ActivateTenant`    |                      | `OnTenantStatusChanged`                         |
+| `SuspendTenant`     |                      | `OnTenantStatusChanged`, only if status actually changes (suspending an already-suspended tenant fires nothing) |
+| `ActivateTenant`    |                      | `OnTenantStatusChanged`, only if status actually changes (activating an already-active tenant fires nothing) |
 | `DeleteTenant`      |                      | `OnTenantDeleted`                               |
 
 `DeleteTenant` remains a soft delete (status set to `cancelled`); it fires

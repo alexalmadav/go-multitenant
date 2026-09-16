@@ -510,6 +510,56 @@ CREATE TABLE projects (
 );
 ```
 
+## ⬆️ Upgrading from v0.6
+
+v0.6.0 provisioned every tenant schema with hardcoded tables
+(`projects`, `tasks`, `documents`, `tenant_users`) and had no migration
+tracking. v0.7.0 removes that: schemas come entirely from your own migration
+files (see [Tenant schema](#tenant-schema) above). This changes behaviour for
+tenants that already exist.
+
+- **New tenants** provisioned after upgrading get no tables at all unless you
+  set `config.Database.MigrationsDir`. If you relied on the old built-in
+  tables, write migration files that create them.
+- **Existing (already-provisioned) tenants** keep the tables v0.6 created —
+  upgrading does not touch tenant schemas. What they don't have is any row in
+  `public.tenant_migrations`, so `ProvisionTenant` (re-run on a tenant whose
+  provisioning previously failed) and `ApplyPendingToAllTenants` will try to
+  create `projects`/`tasks`/`documents`/`tenant_users` again and fail against
+  the tables that already exist. Bring existing tenants under migration
+  control one of two ways:
+  - Write your first migration files (e.g. `001_create_projects.up.sql`) using
+    `CREATE TABLE IF NOT EXISTS` for every table v0.6 created, so applying them
+    against an already-populated schema is a no-op; or
+  - Backfill baseline rows into `public.tenant_migrations` so the library
+    considers those tables already migrated and never tries to recreate them:
+    ```sql
+    INSERT INTO public.tenant_migrations (id, tenant_id, version, name, checksum, applied_at)
+    SELECT gen_random_uuid(), id, '001', 'baseline', NULL, now() FROM public.tenants;
+    ```
+    Adjust the `version`/`name` to match whatever you name your first real
+    migration file, so that file is treated as already applied too.
+- **Limits enforcement**: `LimitsConfig.UsageTables` defaults to empty, so
+  `EnforceLimits: true` silently stops enforcing `max_projects`/`max_users`
+  (and any other limit) unless you list the table backing it. To keep v0.6
+  behaviour:
+  ```go
+  config.Limits.UsageTables = map[string]string{
+      "max_projects": "projects",
+      "max_users":    "tenant_users",
+  }
+  ```
+- **Removed APIs**: `Manager.GetTenantDB`, `GetTenantDBFromContext`,
+  `ContextKeyTenantDB`, `SchemaManager.SetSearchPath`, `ExtensibleTenant` and
+  `ExtensibleRepository` are gone. Replacements:
+  - For per-tenant SQL, use `mt.Migrations` (`ApplyPending`,
+    `ApplyMigrationFromFile`, `RollbackMigration`, ...) for schema changes, or
+    open your own transaction against `mt.GetDatabase()` and set
+    `SET LOCAL search_path TO "<tenant schema>"` yourself the way
+    `MigrationManager` does internally.
+  - For arbitrary per-tenant data that isn't a schema, use `Tenant.Metadata`
+    (see [Metadata](#metadata) above) instead of a second tenant type.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
