@@ -13,6 +13,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 // stubManager implements only the Manager methods the middleware under test
@@ -276,5 +278,101 @@ func TestValidateTenant_RequireAuthentication(t *testing.T) {
 	code, _ = runValidate(t, tenant.StatusActive, Config{RequireAuthentication: true}, true)
 	if code != http.StatusOK {
 		t.Errorf("with user: got %d, want 200", code)
+	}
+}
+
+// --- RequireAdmin / LogAccess --------------------------------------------
+
+func runRequireAdmin(t *testing.T, setup func(c *gin.Context)) (int, map[string]any) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	mw := NewMiddleware(&lookupManager{}, nil, zap.NewNop(), Config{})
+	r := gin.New()
+	r.Use(func(c *gin.Context) { setup(c); c.Next() }, mw.RequireAdmin())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	return rec.Code, body
+}
+
+func TestRequireAdmin_AllowsAdminRoleOrTenantAdminFlag(t *testing.T) {
+	cases := map[string]func(c *gin.Context){
+		"user_role=admin":      func(c *gin.Context) { c.Set("user_role", "admin") },
+		"is_tenant_admin=true": func(c *gin.Context) { c.Set("is_tenant_admin", true) },
+	}
+	for name, setup := range cases {
+		t.Run(name, func(t *testing.T) {
+			if code, _ := runRequireAdmin(t, setup); code != http.StatusOK {
+				t.Errorf("status = %d, want 200", code)
+			}
+		})
+	}
+}
+
+func TestRequireAdmin_RejectsNonAdminWith403(t *testing.T) {
+	id := uuid.New()
+	code, body := runRequireAdmin(t, func(c *gin.Context) {
+		c.Set("user_role", "member")
+		c.Set("tenant", &tenant.Context{TenantID: id})
+	})
+	if code != http.StatusForbidden || errorCode(body) != "ADMIN_REQUIRED" {
+		t.Errorf("got %d %v, want 403 ADMIN_REQUIRED", code, body)
+	}
+	if got, _ := body["tenant_id"].(string); got != id.String() {
+		t.Errorf("tenant_id in response = %q, want %s", got, id)
+	}
+}
+
+func TestLogAccess_EmitsOneEntryWithTenantAndRequestFields(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	id := uuid.New()
+	gin.SetMode(gin.TestMode)
+	mw := NewMiddleware(&lookupManager{}, nil, zap.New(core), Config{})
+	r := gin.New()
+	r.Use(func(c *gin.Context) {
+		c.Set("tenant", &tenant.Context{TenantID: id, Subdomain: "acme"})
+		c.Set("user_id", "user-1")
+		c.Next()
+	}, mw.LogAccess())
+	r.POST("/projects", func(c *gin.Context) { c.Status(http.StatusCreated) })
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/projects", nil))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	entries := logs.FilterMessage("Tenant access").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one access log entry, got %d", len(entries))
+	}
+	fields := entries[0].ContextMap()
+	want := map[string]string{"tenant_id": id.String(), "subdomain": "acme", "user_id": "user-1", "method": "POST", "path": "/projects"}
+	for k, v := range want {
+		if fields[k] != v {
+			t.Errorf("log field %s = %v, want %s", k, fields[k], v)
+		}
+	}
+}
+
+func TestLogAccess_WithoutTenantContextIsSilent(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	gin.SetMode(gin.TestMode)
+	mw := NewMiddleware(&lookupManager{}, nil, zap.New(core), Config{})
+	r := gin.New()
+	r.Use(mw.LogAccess())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if n := logs.FilterMessage("Tenant access").Len(); n != 0 {
+		t.Errorf("expected no access log without tenant context, got %d", n)
 	}
 }
