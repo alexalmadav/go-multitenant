@@ -170,7 +170,7 @@ func NewMockSchemaManager(prefix string) *MockSchemaManager {
 	}
 }
 
-func (m *MockSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error {
+func (m *MockSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error {
 	if m.schemas[tenantID] {
 		return errors.New("schema already exists")
 	}
@@ -189,13 +189,6 @@ func (m *MockSchemaManager) SchemaExists(ctx context.Context, tenantID uuid.UUID
 
 func (m *MockSchemaManager) GetSchemaName(tenantID uuid.UUID) string {
 	return fmt.Sprintf("%s%s", m.prefix, tenantID.String())
-}
-
-func (m *MockSchemaManager) SetSearchPath(db *sql.DB, tenantID uuid.UUID) error {
-	if !m.schemas[tenantID] {
-		return errors.New("schema does not exist")
-	}
-	return nil
 }
 
 func (m *MockSchemaManager) ListTenantSchemas(ctx context.Context) ([]string, error) {

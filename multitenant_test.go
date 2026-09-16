@@ -323,10 +323,6 @@ func (m *MockMultiTenantManager) GetStats(ctx context.Context, tenantID uuid.UUI
 	return &tenant.Stats{}, nil
 }
 
-func (m *MockMultiTenantManager) GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
-	return &sql.DB{}, nil
-}
-
 func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*tenant.Conn, error) {
 	return nil, nil
 }

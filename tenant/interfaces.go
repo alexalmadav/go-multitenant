@@ -33,10 +33,6 @@ type Manager interface {
 
 	// Database operations
 	//
-	// Deprecated: GetTenantDB is unsafe with connection pools. Use GetTenantConn or WithTenantTx instead.
-	// The search_path set on one connection may not apply to subsequent queries from the pool.
-	GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error)
-
 	// GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
 	// IMPORTANT: The caller MUST close the connection when done to return it to the pool.
 	// Example:
@@ -73,11 +69,10 @@ type Resolver interface {
 
 // SchemaManager handles database schema operations
 type SchemaManager interface {
-	CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error
+	CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error
 	DropTenantSchema(ctx context.Context, tenantID uuid.UUID) error
 	SchemaExists(ctx context.Context, tenantID uuid.UUID) (bool, error)
 	GetSchemaName(tenantID uuid.UUID) string
-	SetSearchPath(db *sql.DB, tenantID uuid.UUID) error
 	ListTenantSchemas(ctx context.Context) ([]string, error)
 }
 
@@ -137,8 +132,6 @@ const (
 	ContextKeyTenant ContextKey = "tenant"
 	// ContextKeyTenantID is the context key for tenant ID
 	ContextKeyTenantID ContextKey = "tenant_id"
-	// ContextKeyTenantDB is the context key for tenant database connection (deprecated)
-	ContextKeyTenantDB ContextKey = "tenant_db"
 	// ContextKeyTenantConn is the context key for dedicated tenant database connection
 	ContextKeyTenantConn ContextKey = "tenant_conn"
 )
@@ -153,14 +146,6 @@ func GetTenantFromContext(ctx context.Context) (*Context, bool) {
 func GetTenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	tenantID, ok := ctx.Value(ContextKeyTenantID).(uuid.UUID)
 	return tenantID, ok
-}
-
-// GetTenantDBFromContext extracts tenant database connection from a context.
-//
-// Deprecated: Use GetTenantConnFromContext instead for safe tenant-scoped queries.
-func GetTenantDBFromContext(ctx context.Context) (*sql.DB, bool) {
-	db, ok := ctx.Value(ContextKeyTenantDB).(*sql.DB)
-	return db, ok
 }
 
 // GetTenantConnFromContext extracts the dedicated tenant database connection from context.

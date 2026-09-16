@@ -99,17 +99,7 @@ func TestIntegration_FullTenantLifecycle(t *testing.T) {
 		t.Errorf("Tenant status after provision = %v, want %v", retrievedTenant.Status, StatusActive)
 	}
 
-	// Test 5: Get tenant database connection
-	tenantDB, err := mt.Manager.GetTenantDB(ctx, tenantID)
-	if err != nil {
-		t.Fatalf("GetTenantDB failed: %v", err)
-	}
-
-	if tenantDB == nil {
-		t.Error("GetTenantDB should not return nil")
-	}
-
-	// Test 6: Test tenant context
+	// Test 5: Test tenant context
 	tenantCtx := mt.Manager.WithTenantContext(ctx, tenantID)
 	if retrievedCtx, ok := GetTenantFromContext(tenantCtx); !ok {
 		t.Error("WithTenantContext should add tenant to context")
@@ -410,7 +400,7 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 		}
 	}
 
-	// Get tenant-specific connections (using safe GetTenantConn, not deprecated GetTenantDB)
+	// Get tenant-specific connections using the safe GetTenantConn
 	conn1, err := mt.Manager.GetTenantConn(ctx, tenant1ID)
 	if err != nil {
 		t.Fatalf("GetTenantConn for tenant1 failed: %v", err)
@@ -424,13 +414,13 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 	defer conn2.Close()
 
 	// Insert data into tenant1's projects table
-	_, err = conn1.ExecContext(ctx, "INSERT INTO projects (name, description) VALUES ($1, $2)", "Tenant 1 Project", "Project for tenant 1")
+	_, err = conn1.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", "Tenant 1 Project")
 	if err != nil {
 		t.Fatalf("Failed to insert into tenant1 projects: %v", err)
 	}
 
 	// Insert data into tenant2's projects table
-	_, err = conn2.ExecContext(ctx, "INSERT INTO projects (name, description) VALUES ($1, $2)", "Tenant 2 Project", "Project for tenant 2")
+	_, err = conn2.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", "Tenant 2 Project")
 	if err != nil {
 		t.Fatalf("Failed to insert into tenant2 projects: %v", err)
 	}

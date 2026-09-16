@@ -40,48 +40,18 @@ func (sm *SchemaManager) GetSchemaName(tenantID uuid.UUID) string {
 	return fmt.Sprintf("%s%s", sm.schemaPrefix, strings.ReplaceAll(tenantID.String(), "-", "_"))
 }
 
-// CreateTenantSchema creates a new tenant schema with all required tables
-func (sm *SchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error {
+// CreateTenantSchema creates the tenant's schema. It creates no tables; the
+// application's migration files define the schema contents.
+func (sm *SchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error {
 	schemaName := sm.GetSchemaName(tenantID)
-	quotedSchema := sm.quotedSchemaName(tenantID)
-
 	sm.logger.Info("Creating tenant schema",
-		zap.String("tenant_id", tenantID.String()),
-		zap.String("schema_name", schemaName),
-		zap.String("tenant_name", name))
-
-	tx, err := sm.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Create the schema
-	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", quotedSchema)
-	if _, err := tx.ExecContext(ctx, createSchemaSQL); err != nil {
-		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
-	}
-
-	// Set search path to ONLY the tenant schema (no public fallback for DDL)
-	// This ensures all objects are created in the tenant schema
-	setSearchPathSQL := fmt.Sprintf("SET LOCAL search_path TO %s", quotedSchema)
-	if _, err := tx.ExecContext(ctx, setSearchPathSQL); err != nil {
-		return fmt.Errorf("failed to set search path: %w", err)
-	}
-
-	// Create tenant-specific tables with explicit schema qualification
-	if err := sm.createTenantTables(ctx, tx, quotedSchema); err != nil {
-		return fmt.Errorf("failed to create tenant tables: %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-
-	sm.logger.Info("Successfully created tenant schema",
 		zap.String("tenant_id", tenantID.String()),
 		zap.String("schema_name", schemaName))
 
+	createSchemaSQL := fmt.Sprintf("CREATE SCHEMA IF NOT EXISTS %s", sm.quotedSchemaName(tenantID))
+	if _, err := sm.db.ExecContext(ctx, createSchemaSQL); err != nil {
+		return fmt.Errorf("failed to create schema %s: %w", schemaName, err)
+	}
 	return nil
 }
 
@@ -131,23 +101,6 @@ func (sm *SchemaManager) SchemaExists(ctx context.Context, tenantID uuid.UUID) (
 	return exists, nil
 }
 
-// SetSearchPath sets the PostgreSQL search path to the tenant schema
-func (sm *SchemaManager) SetSearchPath(db *sql.DB, tenantID uuid.UUID) error {
-	quotedSchemaName := sm.quotedSchemaName(tenantID)
-	query := fmt.Sprintf("SET search_path TO %s, public", quotedSchemaName)
-
-	_, err := db.Exec(query)
-	if err != nil {
-		sm.logger.Error("Failed to set search path",
-			zap.String("tenant_id", tenantID.String()),
-			zap.String("query", query),
-			zap.Error(err))
-		return fmt.Errorf("error setting search path: %w", err)
-	}
-
-	return nil
-}
-
 // ListTenantSchemas returns all tenant schemas found in the database
 func (sm *SchemaManager) ListTenantSchemas(ctx context.Context) ([]string, error) {
 	// starts_with is a literal prefix match; LIKE would treat "_" in the
@@ -183,113 +136,4 @@ func (sm *SchemaManager) ListTenantSchemas(ctx context.Context) ([]string, error
 func (sm *SchemaManager) quotedSchemaName(tenantID uuid.UUID) string {
 	schemaName := sm.GetSchemaName(tenantID)
 	return fmt.Sprintf(`"%s"`, schemaName)
-}
-
-// createTenantTables creates the standard tenant tables with explicit schema qualification
-// This is a basic implementation - in practice, you'd want this to be configurable
-func (sm *SchemaManager) createTenantTables(ctx context.Context, tx *sql.Tx, quotedSchema string) error {
-	// Example tenant tables - customize based on your needs
-	// All tables use explicit schema qualification to prevent accidental creation in public
-	tables := []string{
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.projects (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			name VARCHAR(255) NOT NULL,
-			description TEXT,
-			status VARCHAR(50) NOT NULL DEFAULT 'active',
-			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-		)`, quotedSchema),
-
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.tasks (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			project_id UUID NOT NULL,
-			title VARCHAR(255) NOT NULL,
-			description TEXT,
-			status VARCHAR(50) NOT NULL DEFAULT 'pending',
-			priority VARCHAR(20) NOT NULL DEFAULT 'medium',
-			due_date TIMESTAMP WITH TIME ZONE,
-			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (project_id) REFERENCES %s.projects(id) ON DELETE CASCADE
-		)`, quotedSchema, quotedSchema),
-
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.documents (
-			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			project_id UUID NOT NULL,
-			file_name VARCHAR(255) NOT NULL,
-			file_path VARCHAR(500) NOT NULL,
-			file_type VARCHAR(100),
-			file_size BIGINT,
-			uploaded_by UUID,
-			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			FOREIGN KEY (project_id) REFERENCES %s.projects(id) ON DELETE CASCADE
-		)`, quotedSchema, quotedSchema),
-
-		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s.tenant_users (
-			user_id UUID NOT NULL,
-			role VARCHAR(50) NOT NULL DEFAULT 'user',
-			permissions JSONB,
-			is_active BOOLEAN DEFAULT TRUE,
-			joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			PRIMARY KEY (user_id)
-		)`, quotedSchema),
-	}
-
-	// Create indexes with explicit schema qualification
-	indexes := []string{
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_projects_status ON %s.projects(status)", quotedSchema),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_projects_created_at ON %s.projects(created_at)", quotedSchema),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON %s.tasks(project_id)", quotedSchema),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_tasks_status ON %s.tasks(status)", quotedSchema),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_tasks_due_date ON %s.tasks(due_date)", quotedSchema),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_documents_project_id ON %s.documents(project_id)", quotedSchema),
-		fmt.Sprintf("CREATE INDEX IF NOT EXISTS idx_tenant_users_role ON %s.tenant_users(role)", quotedSchema),
-	}
-
-	// Create update trigger function with explicit schema qualification
-	// Using CREATE FUNCTION (not OR REPLACE) to ensure it's created in the tenant schema
-	// and fails loudly if it somehow already exists
-	triggerFunctionSQL := fmt.Sprintf(`CREATE FUNCTION %s.update_updated_at_column()
-		RETURNS TRIGGER AS $$
-		BEGIN
-			NEW.updated_at = CURRENT_TIMESTAMP;
-			RETURN NEW;
-		END;
-		$$ language 'plpgsql'`, quotedSchema)
-
-	// Create triggers referencing the schema-qualified function
-	triggers := []string{
-		fmt.Sprintf("CREATE TRIGGER update_projects_updated_at BEFORE UPDATE ON %s.projects FOR EACH ROW EXECUTE FUNCTION %s.update_updated_at_column()", quotedSchema, quotedSchema),
-		fmt.Sprintf("CREATE TRIGGER update_tasks_updated_at BEFORE UPDATE ON %s.tasks FOR EACH ROW EXECUTE FUNCTION %s.update_updated_at_column()", quotedSchema, quotedSchema),
-		fmt.Sprintf("CREATE TRIGGER update_tenant_users_updated_at BEFORE UPDATE ON %s.tenant_users FOR EACH ROW EXECUTE FUNCTION %s.update_updated_at_column()", quotedSchema, quotedSchema),
-	}
-
-	// Execute all table creation statements
-	for _, tableSQL := range tables {
-		if _, err := tx.ExecContext(ctx, tableSQL); err != nil {
-			return fmt.Errorf("failed to create table: %w", err)
-		}
-	}
-
-	// Execute all index creation statements
-	for _, indexSQL := range indexes {
-		if _, err := tx.ExecContext(ctx, indexSQL); err != nil {
-			return fmt.Errorf("failed to create index: %w", err)
-		}
-	}
-
-	// Create the trigger function first
-	if _, err := tx.ExecContext(ctx, triggerFunctionSQL); err != nil {
-		return fmt.Errorf("failed to create trigger function: %w", err)
-	}
-
-	// Execute all trigger creation statements
-	for _, triggerSQL := range triggers {
-		if _, err := tx.ExecContext(ctx, triggerSQL); err != nil {
-			return fmt.Errorf("failed to create trigger: %w", err)
-		}
-	}
-
-	return nil
 }

@@ -3,10 +3,13 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -363,53 +366,73 @@ func TestManager_ListTenants(t *testing.T) {
 	}
 }
 
-func TestManager_ProvisionTenant(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	config := DefaultConfig()
-
-	mockRepo := NewMockRepository()
-	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
-	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
-
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
-
-	// Create a test tenant
+func TestManager_ProvisionTenant_CreatesSchemaAppliesPendingAndActivates(t *testing.T) {
+	mockRepo, mockSchema, mockMig := newManagerMocks()
+	manager := newTestManager(mockRepo, mockSchema, mockMig)
 	tenantID := uuid.New()
-	tenant := &Tenant{
-		ID:        tenantID,
-		Name:      "Test Tenant",
-		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
-		Status:    StatusPending,
+	mockRepo.tenants[tenantID] = &Tenant{ID: tenantID, Name: "T", Subdomain: "ttt", Status: StatusPending}
+
+	if err := manager.ProvisionTenant(context.Background(), tenantID); err != nil {
+		t.Fatalf("ProvisionTenant: %v", err)
 	}
+	if exists, _ := mockSchema.SchemaExists(context.Background(), tenantID); !exists {
+		t.Error("schema should exist")
+	}
+	if mockMig.applyPendingCalls != 1 {
+		t.Errorf("ApplyPending calls = %d, want 1", mockMig.applyPendingCalls)
+	}
+	if mockRepo.tenants[tenantID].Status != StatusActive {
+		t.Errorf("status = %s, want active", mockRepo.tenants[tenantID].Status)
+	}
+}
 
-	// Add to mock repository
-	mockRepo.tenants[tenantID] = tenant
+func TestManager_ProvisionTenant_LeavesPendingOnMigrationFailureAndResumes(t *testing.T) {
+	mockRepo, mockSchema, mockMig := newManagerMocks()
+	manager := newTestManager(mockRepo, mockSchema, mockMig)
+	tenantID := uuid.New()
+	mockRepo.tenants[tenantID] = &Tenant{ID: tenantID, Name: "T", Subdomain: "ttt", Status: StatusPending}
+	mockMig.applyPendingErr = errors.New("migration 002 failed")
 
-	// Test provisioning
 	err := manager.ProvisionTenant(context.Background(), tenantID)
-	if err != nil {
-		t.Errorf("ProvisionTenant() error = %v, want nil", err)
-		return
+	if err == nil || !strings.Contains(err.Error(), "migration 002 failed") {
+		t.Fatalf("expected migration error, got %v", err)
+	}
+	if mockRepo.tenants[tenantID].Status != StatusPending {
+		t.Errorf("status after failure = %s, want pending", mockRepo.tenants[tenantID].Status)
+	}
+	if exists, _ := mockSchema.SchemaExists(context.Background(), tenantID); !exists {
+		t.Error("schema should be kept for a resumable retry")
 	}
 
-	// Verify schema was created
-	exists, _ := mockSchema.SchemaExists(context.Background(), tenantID)
-	if !exists {
-		t.Error("ProvisionTenant() should create tenant schema")
+	if err := manager.ProvisionTenant(context.Background(), tenantID); err != nil {
+		t.Fatalf("retry should succeed: %v", err)
 	}
+	if mockRepo.tenants[tenantID].Status != StatusActive {
+		t.Errorf("status after retry = %s, want active", mockRepo.tenants[tenantID].Status)
+	}
+}
 
-	// Verify tenant status was updated
-	if tenant.Status != StatusActive {
-		t.Error("ProvisionTenant() should set status to active")
-	}
+func TestManager_ProvisionTenant_RejectsCancelledTenant(t *testing.T) {
+	mockRepo, mockSchema, mockMig := newManagerMocks()
+	manager := newTestManager(mockRepo, mockSchema, mockMig)
+	tenantID := uuid.New()
+	mockRepo.tenants[tenantID] = &Tenant{ID: tenantID, Name: "T", Subdomain: "ttt", Status: StatusCancelled}
 
-	// Test provisioning already provisioned tenant
-	err = manager.ProvisionTenant(context.Background(), tenantID)
-	if err != nil {
-		t.Errorf("ProvisionTenant() should not error for already provisioned tenant, got: %v", err)
+	if err := manager.ProvisionTenant(context.Background(), tenantID); err == nil {
+		t.Fatal("expected error provisioning a cancelled tenant")
 	}
+}
+
+// newManagerMocks creates a fresh set of mocks for manager tests.
+func newManagerMocks() (*MockManagerRepository, *MockManagerSchemaManager, *MockManagerMigrationManager) {
+	return &MockManagerRepository{tenants: make(map[uuid.UUID]*Tenant)},
+		&MockManagerSchemaManager{schemas: make(map[uuid.UUID]bool)},
+		&MockManagerMigrationManager{}
+}
+
+// newTestManager builds a manager wired to the given mocks.
+func newTestManager(repo *MockManagerRepository, schema *MockManagerSchemaManager, mig *MockManagerMigrationManager) Manager {
+	return NewManager(DefaultConfig(), nil, repo, schema, mig, &MockManagerLimitChecker{}, zap.NewNop())
 }
 
 func TestManager_SuspendTenant(t *testing.T) {
@@ -800,10 +823,10 @@ type MockManagerSchemaManager struct {
 	prefix  string
 }
 
-func (m *MockManagerSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error {
-	if m.schemas[tenantID] {
-		return &TenantError{TenantID: tenantID, Code: "SCHEMA_EXISTS", Message: "schema already exists"}
-	}
+// CreateTenantSchema mirrors the real SchemaManager's "CREATE SCHEMA IF NOT
+// EXISTS" behaviour: creating an already-existing schema is not an error, so
+// a resumable ProvisionTenant retry can call it again safely.
+func (m *MockManagerSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error {
 	m.schemas[tenantID] = true
 	return nil
 }
@@ -819,13 +842,6 @@ func (m *MockManagerSchemaManager) SchemaExists(ctx context.Context, tenantID uu
 
 func (m *MockManagerSchemaManager) GetSchemaName(tenantID uuid.UUID) string {
 	return m.prefix + tenantID.String()
-}
-
-func (m *MockManagerSchemaManager) SetSearchPath(db *sql.DB, tenantID uuid.UUID) error {
-	if !m.schemas[tenantID] {
-		return &TenantError{TenantID: tenantID, Code: "SCHEMA_NOT_FOUND", Message: "schema does not exist"}
-	}
-	return nil
 }
 
 func (m *MockManagerSchemaManager) ListTenantSchemas(ctx context.Context) ([]string, error) {

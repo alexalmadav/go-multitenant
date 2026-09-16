@@ -101,47 +101,38 @@ func (m *manager) ListTenants(ctx context.Context, page, perPage int) ([]*Tenant
 	return m.repository.List(ctx, page, perPage)
 }
 
-// ProvisionTenant creates the tenant schema and activates the tenant
+// ProvisionTenant creates the tenant schema, applies every pending migration
+// file, and activates the tenant. It is safe to re-run: a failed provision
+// leaves the tenant pending with the work done so far, and the next run
+// continues from there.
 func (m *manager) ProvisionTenant(ctx context.Context, id uuid.UUID) error {
-	// Get tenant
 	tenant, err := m.repository.GetByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
-
-	// Check if already provisioned
-	exists, err := m.schemaManager.SchemaExists(ctx, id)
-	if err != nil {
-		return fmt.Errorf("failed to check schema existence: %w", err)
+	if tenant.Status == StatusCancelled {
+		return fmt.Errorf("cannot provision cancelled tenant %s", id)
 	}
 
-	if exists {
-		m.logger.Info("Tenant schema already exists",
-			zap.String("tenant_id", id.String()))
-		return nil
-	}
-
-	// Create tenant schema
-	if err := m.schemaManager.CreateTenantSchema(ctx, id, tenant.Name); err != nil {
+	if err := m.schemaManager.CreateTenantSchema(ctx, id); err != nil {
 		return fmt.Errorf("failed to create tenant schema: %w", err)
 	}
 
-	// Update tenant status to active
+	if err := m.migrationMgr.ApplyPending(ctx, id); err != nil {
+		return fmt.Errorf("failed to apply migrations: %w", err)
+	}
+
+	if tenant.Status == StatusActive {
+		return nil
+	}
 	tenant.Status = StatusActive
 	if err := m.repository.Update(ctx, tenant); err != nil {
-		// Try to clean up schema if update fails
-		if dropErr := m.schemaManager.DropTenantSchema(ctx, id); dropErr != nil {
-			m.logger.Error("Failed to cleanup schema after provisioning failure",
-				zap.String("tenant_id", id.String()),
-				zap.Error(dropErr))
-		}
-		return fmt.Errorf("failed to update tenant status: %w", err)
+		return fmt.Errorf("failed to activate tenant: %w", err)
 	}
 
 	m.logger.Info("Successfully provisioned tenant",
 		zap.String("tenant_id", id.String()),
 		zap.String("name", tenant.Name))
-
 	return nil
 }
 
@@ -240,23 +231,6 @@ func (m *manager) LimitChecker() LimitChecker {
 // GetStats retrieves tenant usage statistics
 func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
 	return m.repository.GetStats(ctx, tenantID)
-}
-
-// GetTenantDB returns a database connection with tenant context set.
-//
-// Deprecated: This method is unsafe with connection pools. The search_path is set on
-// one connection, but subsequent queries may use different connections from the pool.
-// Use GetTenantConn or WithTenantTx instead for safe tenant-scoped queries.
-func (m *manager) GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
-	m.logger.Warn("GetTenantDB is deprecated and unsafe with connection pools. Use GetTenantConn or WithTenantTx instead.",
-		zap.String("tenant_id", tenantID.String()))
-
-	// This is fundamentally unsafe but kept for backward compatibility
-	if err := m.schemaManager.SetSearchPath(m.db, tenantID); err != nil {
-		return nil, fmt.Errorf("failed to set tenant context: %w", err)
-	}
-
-	return m.db, nil
 }
 
 // GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
