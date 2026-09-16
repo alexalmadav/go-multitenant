@@ -612,6 +612,14 @@ func TestManager_GetStats(t *testing.T) {
 	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
 
 	tenantID := uuid.New()
+	mockRepo.tenants[tenantID] = &Tenant{ID: tenantID, Name: "T", Subdomain: "get-stats-t"}
+	if err := mockSchema.CreateTenantSchema(context.Background(), tenantID); err != nil {
+		t.Fatalf("CreateTenantSchema: %v", err)
+	}
+	mockMigration.applied = []*Migration{
+		{ID: uuid.New(), TenantID: tenantID, Version: "001"},
+		{ID: uuid.New(), TenantID: tenantID, Version: "002"},
+	}
 
 	stats, err := manager.GetStats(context.Background(), tenantID)
 	if err != nil {
@@ -621,6 +629,15 @@ func TestManager_GetStats(t *testing.T) {
 
 	if stats.TenantID != tenantID {
 		t.Error("GetStats() should return stats for correct tenant")
+	}
+	if !stats.SchemaExists {
+		t.Error("GetStats() should report SchemaExists = true")
+	}
+	if stats.AppliedMigrations != 2 {
+		t.Errorf("GetStats() AppliedMigrations = %d, want 2", stats.AppliedMigrations)
+	}
+	if len(stats.Usage) != 0 {
+		t.Errorf("GetStats() Usage = %v, want empty (no usage tracker)", stats.Usage)
 	}
 }
 
@@ -696,14 +713,12 @@ func TestManager_Close(t *testing.T) {
 func NewMockRepository() *MockManagerRepository {
 	return &MockManagerRepository{
 		tenants: make(map[uuid.UUID]*Tenant),
-		stats:   make(map[uuid.UUID]*Stats),
 	}
 }
 
 // MockManagerRepository implements Repository interface for testing
 type MockManagerRepository struct {
 	tenants map[uuid.UUID]*Tenant
-	stats   map[uuid.UUID]*Stats
 }
 
 func (m *MockManagerRepository) Create(ctx context.Context, t *Tenant) error {
@@ -790,22 +805,6 @@ func (m *MockManagerRepository) List(ctx context.Context, page, perPage int) ([]
 	return activeTenants[start:end], total, nil
 }
 
-func (m *MockManagerRepository) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
-	stats, exists := m.stats[tenantID]
-	if !exists {
-		stats = &Stats{
-			TenantID:      tenantID,
-			UserCount:     0,
-			ProjectCount:  0,
-			StorageUsedGB: 0.0,
-			LastActivity:  time.Now(),
-			SchemaExists:  true,
-		}
-		m.stats[tenantID] = stats
-	}
-	return stats, nil
-}
-
 // NewMockSchemaManager creates a mock schema manager for testing
 func NewMockSchemaManager(prefix string) *MockManagerSchemaManager {
 	if prefix == "" {
@@ -865,6 +864,9 @@ type MockManagerMigrationManager struct {
 	// applyPendingErr, when set, is returned once by ApplyPending and then cleared.
 	applyPendingErr   error
 	applyPendingCalls int
+	// applied, when set, is returned directly by GetAppliedMigrations,
+	// regardless of tenant ID.
+	applied []*Migration
 }
 
 func (m *MockManagerMigrationManager) ApplyMigration(ctx context.Context, tenantID uuid.UUID, migration *Migration) error {
@@ -916,6 +918,10 @@ func (m *MockManagerMigrationManager) ApplyPending(ctx context.Context, tenantID
 func (m *MockManagerMigrationManager) ApplyPendingToAllTenants(ctx context.Context) error { return nil }
 
 func (m *MockManagerMigrationManager) GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*Migration, error) {
+	if m.applied != nil {
+		return m.applied, nil
+	}
+
 	migrations := m.appliedMigrations[tenantID]
 	if migrations == nil {
 		return []*Migration{}, nil

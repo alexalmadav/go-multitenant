@@ -157,12 +157,17 @@ func newTestDB(t *testing.T) *testDB {
 // fixtureMigrationsDir is the schema every integration tenant gets.
 var fixtureMigrationsDir = filepath.Join("testdata", "migrations")
 
-// testConfig returns the config integration tests use: the fixture migrations
-// and usage counting for the two fixture tables.
+// testConfig returns the config integration tests use: the given DSN, the
+// fixture migrations directory, and usage tracking mapped to the two fixture
+// tables (projects, tenant_users).
 func testConfig(dsn string) tenant.Config {
 	config := tenant.DefaultConfig()
 	config.Database.DSN = dsn
 	config.Database.MigrationsDir = fixtureMigrationsDir
+	config.Limits.UsageTables = map[string]string{
+		"max_projects": "projects",
+		"max_users":    "tenant_users",
+	}
 	return config
 }
 
@@ -2422,5 +2427,45 @@ func TestDatabase_Provision_ResumesAfterFailingMigration(t *testing.T) {
 	}
 	if ok, _ := mm.IsMigrationApplied(ctx, id, "002"); !ok {
 		t.Errorf("002 should be applied after retry")
+	}
+}
+
+func TestDatabase_UsageTracker_CountsConfiguredTableAndSkipsOthers(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	seedProjects(t, mt, ids[0], 3)
+
+	tracker := mt.Manager.LimitChecker().GetUsageTracker()
+	v, err := tracker.GetCurrentUsage(ctx, ids[0], "max_projects")
+	if err != nil || v != 3 {
+		t.Errorf("max_projects usage = %v, %v; want 3", v, err)
+	}
+	v, err = tracker.GetCurrentUsage(ctx, ids[0], "api_calls_per_month")
+	if err != nil || v != nil {
+		t.Errorf("unmapped limit should report nil, got %v, %v", v, err)
+	}
+}
+
+func TestDatabase_GetStats_ReportsMigrationsAndUsage(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	seedProjects(t, mt, ids[0], 2)
+
+	stats, err := mt.Manager.GetStats(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("GetStats: %v", err)
+	}
+	if !stats.SchemaExists {
+		t.Error("SchemaExists should be true")
+	}
+	if stats.AppliedMigrations != 2 { // fixture has 001 and 002
+		t.Errorf("AppliedMigrations = %d, want 2", stats.AppliedMigrations)
+	}
+	if stats.Usage["max_projects"] != 2 || stats.Usage["max_users"] != 0 {
+		t.Errorf("Usage = %v, want max_projects=2 max_users=0", stats.Usage)
 	}
 }

@@ -109,7 +109,6 @@ type Repository interface {
 	Update(ctx context.Context, tenant *Tenant) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context, page, perPage int) ([]*Tenant, int, error)
-	GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error)
 }
 
 // Middleware represents HTTP middleware for tenant handling

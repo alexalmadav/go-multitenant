@@ -30,14 +30,12 @@ func NewTestHelpers() *TestHelpers {
 // MockRepository implements tenant.Repository for testing
 type MockRepository struct {
 	tenants map[uuid.UUID]*tenant.Tenant
-	stats   map[uuid.UUID]*tenant.Stats
 }
 
 // NewMockRepository creates a new mock repository
 func NewMockRepository() *MockRepository {
 	return &MockRepository{
 		tenants: make(map[uuid.UUID]*tenant.Tenant),
-		stats:   make(map[uuid.UUID]*tenant.Stats),
 	}
 }
 
@@ -129,28 +127,6 @@ func (m *MockRepository) List(ctx context.Context, page, perPage int) ([]*tenant
 	}
 
 	return activeTenants[start:end], total, nil
-}
-
-func (m *MockRepository) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.Stats, error) {
-	stats, exists := m.stats[tenantID]
-	if !exists {
-		// Return default stats
-		stats = &tenant.Stats{
-			TenantID:      tenantID,
-			UserCount:     0,
-			ProjectCount:  0,
-			StorageUsedGB: 0.0,
-			LastActivity:  time.Now(),
-			SchemaExists:  true,
-		}
-		m.stats[tenantID] = stats
-	}
-	return stats, nil
-}
-
-// SetStats allows setting stats for testing
-func (m *MockRepository) SetStats(tenantID uuid.UUID, stats *tenant.Stats) {
-	m.stats[tenantID] = stats
 }
 
 // MockSchemaManager implements tenant.SchemaManager for testing

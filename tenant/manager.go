@@ -228,9 +228,43 @@ func (m *manager) LimitChecker() LimitChecker {
 	return m.limitChecker
 }
 
-// GetStats retrieves tenant usage statistics
+// GetStats reports whether the schema exists, how many migrations are applied,
+// and the current usage for every limit listed in LimitsConfig.UsageTables.
 func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
-	return m.repository.GetStats(ctx, tenantID)
+	if _, err := m.repository.GetByID(ctx, tenantID); err != nil {
+		return nil, fmt.Errorf("failed to get tenant: %w", err)
+	}
+	exists, err := m.schemaManager.SchemaExists(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check schema: %w", err)
+	}
+	stats := &Stats{TenantID: tenantID, SchemaExists: exists, Usage: make(map[string]int)}
+	if !exists {
+		return stats, nil
+	}
+
+	applied, err := m.migrationMgr.GetAppliedMigrations(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list applied migrations: %w", err)
+	}
+	stats.AppliedMigrations = len(applied)
+
+	tracker := m.limitChecker.GetUsageTracker()
+	if tracker == nil {
+		return stats, nil
+	}
+	for limitName := range m.config.Limits.UsageTables {
+		value, err := tracker.GetCurrentUsage(ctx, tenantID, limitName)
+		if err != nil {
+			m.logger.Warn("Failed to read usage",
+				zap.String("tenant_id", tenantID.String()), zap.String("limit", limitName), zap.Error(err))
+			continue
+		}
+		if n, ok := value.(int); ok {
+			stats.Usage[limitName] = n
+		}
+	}
+	return stats, nil
 }
 
 // GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.

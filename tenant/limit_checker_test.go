@@ -575,10 +575,6 @@ func (m *MockLimitCheckerRepository) List(ctx context.Context, page, perPage int
 	return tenants, len(tenants), nil
 }
 
-func (m *MockLimitCheckerRepository) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
-	return &Stats{TenantID: tenantID}, nil
-}
-
 type MockUsageTracker struct{}
 
 func (m *MockUsageTracker) GetCurrentUsage(ctx context.Context, tenantID uuid.UUID, limitName string) (interface{}, error) {

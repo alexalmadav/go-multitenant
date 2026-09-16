@@ -18,9 +18,11 @@ func main() {
 	// Create configuration with custom limits for different plans
 	config := multitenant.DefaultConfig()
 
-	// Configure database
+	// Configure database. MigrationsDir points at this app's migration files,
+	// which define the "projects" and "tenant_users" tables that UsageTables
+	// below counts rows in.
 	config.Database.DSN = "postgres://username:password@localhost:5432/multitenant_billing_db?sslmode=disable"
-	config.Database.MigrationsDir = "./migrations/tenant_migrations"
+	config.Database.MigrationsDir = "./migrations"
 
 	// Configure resolver
 	config.Resolver.Strategy = multitenant.ResolverSubdomain
@@ -31,6 +33,10 @@ func main() {
 		multitenant.PlanBasic:      planLimits(2, 3, 1),
 		multitenant.PlanPro:        planLimits(10, 25, 5),
 		multitenant.PlanEnterprise: planLimits(-1, -1, 50),
+	}
+	config.Limits.UsageTables = map[string]string{
+		"max_projects": "projects",
+		"max_users":    "tenant_users",
 	}
 
 	// Initialize multi-tenant system
@@ -230,7 +236,7 @@ func createProjectWithLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		limits, _ := ginmiddleware.GetTenantLimitsFromContext(c)
-		if limits.MaxProjects > 0 && stats.ProjectCount >= limits.MaxProjects {
+		if limits.MaxProjects > 0 && stats.Usage["max_projects"] >= limits.MaxProjects {
 			c.JSON(http.StatusPaymentRequired, gin.H{
 				"error":        "Project limit reached",
 				"current_plan": "Consider upgrading your plan",
@@ -267,15 +273,13 @@ func getUsage(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 		usage := gin.H{
 			"current": gin.H{
-				"users":    stats.UserCount,
-				"projects": stats.ProjectCount,
-				"storage":  fmt.Sprintf("%.1fGB", stats.StorageUsedGB),
+				"projects": stats.Usage["max_projects"],
+				"users":    stats.Usage["max_users"],
 			},
 			"limits": limits,
 			"percentage": gin.H{
-				"users":    calculatePercentage(stats.UserCount, limits.MaxUsers),
-				"projects": calculatePercentage(stats.ProjectCount, limits.MaxProjects),
-				"storage":  calculatePercentage(int(stats.StorageUsedGB), limits.MaxStorageGB),
+				"users":    calculatePercentage(stats.Usage["max_users"], limits.MaxUsers),
+				"projects": calculatePercentage(stats.Usage["max_projects"], limits.MaxProjects),
 			},
 		}
 

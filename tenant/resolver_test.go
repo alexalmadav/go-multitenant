@@ -534,10 +534,6 @@ func (m *mockRepository) List(ctx context.Context, page, perPage int) ([]*Tenant
 	return tenants, len(tenants), nil
 }
 
-func (m *mockRepository) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
-	return &Stats{TenantID: tenantID}, nil
-}
-
 // ErrTenantNotFound is a mock error for tenant not found
 var ErrTenantNotFound = &TenantError{
 	Code:    "TENANT_NOT_FOUND",

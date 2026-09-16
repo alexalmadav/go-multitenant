@@ -260,44 +260,6 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 	return tenants, total, nil
 }
 
-// GetStats retrieves usage statistics for a tenant
-func (r *Repository) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.Stats, error) {
-	// First get the tenant to get schema name
-	t, err := r.GetByID(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Initialize stats
-	stats := &tenant.Stats{
-		TenantID:     tenantID,
-		LastActivity: time.Now(),
-		SchemaExists: true, // Assume exists for now - could be checked
-	}
-
-	// Get project count from tenant schema
-	projectCountQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.projects`, t.SchemaName)
-	err = r.db.QueryRowContext(ctx, projectCountQuery).Scan(&stats.ProjectCount)
-	if err != nil {
-		// Schema might not exist or no projects table
-		stats.ProjectCount = 0
-		stats.SchemaExists = false
-	}
-
-	// Get user count from tenant schema
-	userCountQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.tenant_users WHERE is_active = true`, t.SchemaName)
-	err = r.db.QueryRowContext(ctx, userCountQuery).Scan(&stats.UserCount)
-	if err != nil {
-		// Schema might not exist or no users table
-		stats.UserCount = 0
-	}
-
-	// Storage calculation would be more complex in practice
-	stats.StorageUsedGB = 0.0
-
-	return stats, nil
-}
-
 // CreateMasterTables creates the master tables needed for tenant management
 func (r *Repository) CreateMasterTables(ctx context.Context) error {
 	tables := []string{
