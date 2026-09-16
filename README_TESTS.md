@@ -147,7 +147,7 @@ go tool cover -html=coverage.out -o coverage.html
 - **Provisioning**: `ProvisionTenant` applies fixture migrations in order and records them; re-provisioning after a failing migration resumes and completes; an empty `MigrationsDir` yields an empty schema; `ApplyPendingToAllTenants` brings an older, already-active tenant up to date
 - **Metadata**: Round-trips through Create/Get/Update/List and `FindByMetadata`; the `metadata` column is added correctly to a pre-existing `tenants` table
 - **Limits**: Default usage tracker rejects usage above plan limits; counts a configured table and skips an unconfigured limit
-- **Hooks**: Registered hooks fire on each `Manager` call (create, provision, update, status change, delete) against a real database
+- **Hooks**: `TestDatabase_Hooks_ProvisionedHookCanPersistMetadata` proves a hook can persist metadata via `UpdateTenant` from inside `OnTenantProvisioned`, against a real database, through `CreateTenant` and `ProvisionTenant`. The full create/provision/update/status-change/delete event matrix is covered by unit tests in `tenant/hooks_test.go` against a mock repository
 - **Resolver Integration**: Tenant resolution with real data
 
 ## Mock Objects

@@ -178,7 +178,7 @@ config.Resolver.HeaderName = "X-Tenant-ID"
 
 ```go
 config.Database = multitenant.DatabaseConfig{
-    Driver:              "postgres",
+    Driver:              "pgx",
     DSN:                "postgres://user:pass@localhost/db?sslmode=disable",
     MaxOpenConns:        100,
     MaxIdleConns:        50,
@@ -463,6 +463,7 @@ CREATE TABLE tenants (
     plan_type VARCHAR(50) NOT NULL DEFAULT 'basic',
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
     schema_name VARCHAR(255) NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
