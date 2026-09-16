@@ -172,7 +172,10 @@ write the column. `Repository` gains:
 FindByMetadata(ctx context.Context, key string, value string) ([]*Tenant, error)
 ```
 
-implemented as `WHERE metadata ->> $1 = $2`.
+implemented as `WHERE metadata ->> $1 = $2`. The GIN index above serves
+containment/key-existence queries (`@>`, `?`), not this one; `FindByMetadata`
+is a sequential scan unless the application adds a B-tree expression index on
+the specific key it queries.
 
 `Manager.UpdateTenant` continues to write the whole row, metadata included.
 There is no separate "update one metadata key" API; callers load, mutate, save.
@@ -219,8 +222,8 @@ safe to call concurrently with request handling (a mutex guards the slice).
 | CreateTenant      | ValidateMetadata     | OnTenantCreated                               |
 | ProvisionTenant   |                      | OnTenantStatusChanged and OnTenantProvisioned, only when the tenant transitions to active; a re-run on an active tenant fires nothing |
 | UpdateTenant      | ValidateMetadata     | OnTenantUpdated; OnTenantStatusChanged if status differs |
-| SuspendTenant     |                      | OnTenantStatusChanged                         |
-| ActivateTenant    |                      | OnTenantStatusChanged                         |
+| SuspendTenant     |                      | OnTenantStatusChanged, only if status actually changes (suspending an already-suspended tenant fires nothing) |
+| ActivateTenant    |                      | OnTenantStatusChanged, only if status actually changes (activating an already-active tenant fires nothing) |
 | DeleteTenant      |                      | OnTenantDeleted                               |
 
 `DeleteTenant` remains a soft delete (status `cancelled`); it fires
@@ -272,6 +275,13 @@ client failure surfaces as a `HookError` while the tenant remains.
 - `Tenant` gains `Metadata`; `ExtensibleTenant` and `ExtensibleRepository` removed.
 - `postgres.NewUsageTracker` takes a `usageTables` argument.
 - Newly provisioned tenants get no tables unless `MigrationsDir` is set.
+- Existing tenants provisioned under v0.6 keep their tables (projects, tasks,
+  documents, tenant_users) but have no rows in `public.tenant_migrations`;
+  bring them under migration control with `CREATE TABLE IF NOT EXISTS` first
+  migrations or by backfilling baseline `tenant_migrations` rows.
+- `LimitsConfig.UsageTables` defaults to empty, so `EnforceLimits: true` no
+  longer enforces any limit unless its table is listed there — v0.6 behaviour
+  for `max_projects`/`max_users` requires setting it explicitly.
 
 ## Testing strategy
 
