@@ -170,10 +170,10 @@ func NewMockSchemaManager(prefix string) *MockSchemaManager {
 	}
 }
 
+// CreateTenantSchema mirrors the real SchemaManager's "CREATE SCHEMA IF NOT
+// EXISTS" behaviour: creating an already-existing schema is not an error, so
+// a resumable ProvisionTenant retry can call it again safely.
 func (m *MockSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error {
-	if m.schemas[tenantID] {
-		return errors.New("schema already exists")
-	}
 	m.schemas[tenantID] = true
 	return nil
 }
