@@ -154,6 +154,18 @@ func newTestDB(t *testing.T) *testDB {
 	}
 }
 
+// fixtureMigrationsDir is the schema every integration tenant gets.
+var fixtureMigrationsDir = filepath.Join("testdata", "migrations")
+
+// testConfig returns the config integration tests use: the fixture migrations
+// and usage counting for the two fixture tables.
+func testConfig(dsn string) tenant.Config {
+	config := tenant.DefaultConfig()
+	config.Database.DSN = dsn
+	config.Database.MigrationsDir = fixtureMigrationsDir
+	return config
+}
+
 func (tdb *testDB) close() {
 	if tdb.db != nil {
 		tdb.db.Close()
@@ -741,8 +753,7 @@ func TestDatabase_FullLifecycle_WithMultiTenant(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 	config.Database.MigrationsDir = ""
 
 	mt, err := New(config)
@@ -876,8 +887,7 @@ func TestDatabase_ConcurrentTenantCreation_NoSchemaLeakage(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 
 	mt, err := New(config)
 	if err != nil {
@@ -971,8 +981,7 @@ func TestDatabase_GetTenantConn_SearchPath(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 
 	mt, err := New(config)
 	if err != nil {
@@ -1031,8 +1040,7 @@ func TestDatabase_GetTenantConn_Isolation(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 
 	mt, err := New(config)
 	if err != nil {
@@ -1146,8 +1154,7 @@ func TestDatabase_WithTenantTx_Rollback(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 
 	mt, err := New(config)
 	if err != nil {
@@ -1248,8 +1255,7 @@ func TestDatabase_GetTenantConn_ConcurrentIsolation(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 
 	mt, err := New(config)
 	if err != nil {
@@ -1382,8 +1388,7 @@ func TestDatabase_WithTenantTx_ConcurrentIsolation(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 
 	mt, err := New(config)
 	if err != nil {
@@ -1513,8 +1518,7 @@ func TestDatabase_GetTenantConn_ResetsSearchPathOnClose(t *testing.T) {
 		t.Skip("No connection string available")
 	}
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 	// Force every query through the same underlying connection so a leaked
 	// session setting is guaranteed to be observed.
 	config.Database.MaxOpenConns = 1
@@ -1573,8 +1577,7 @@ func migrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uuid.UU
 	if connStr == "" {
 		t.Skip("No connection string available")
 	}
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 	mt, err := New(config)
 	if err != nil {
 		t.Fatalf("Failed to create MultiTenant: %v", err)
@@ -1963,8 +1966,7 @@ func TestDatabase_SetTenantDB_HandlerSeesOnlyResolvedTenantsRows(t *testing.T) {
 	if connStr == "" {
 		t.Skip("No connection string available")
 	}
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 	config.Resolver.Strategy = tenant.ResolverHeader
 	config.Resolver.HeaderName = "X-Tenant"
 	mt, err := New(config)
@@ -2014,8 +2016,7 @@ func TestDatabase_SetTenantDB_ReleasesConnectionWithCleanSearchPath(t *testing.T
 	if connStr == "" {
 		t.Skip("No connection string available")
 	}
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 	config.Database.MaxOpenConns = 1
 	config.Database.MaxIdleConns = 1
 	config.Resolver.Strategy = tenant.ResolverHeader
@@ -2113,8 +2114,7 @@ func fileMigrationEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, *database
 	if connStr == "" {
 		t.Skip("No connection string available")
 	}
-	config := tenant.DefaultConfig()
-	config.Database.DSN = connStr
+	config := testConfig(connStr)
 	config.Database.MigrationsDir = dir
 	mt, err := New(config)
 	if err != nil {

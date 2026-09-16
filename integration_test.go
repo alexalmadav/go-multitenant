@@ -46,9 +46,7 @@ func TestIntegration_FullTenantLifecycle(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer db.Close()
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = getTestDatabaseURL()
-	config.Database.MigrationsDir = "" // No migrations for this test
+	config := testConfig(getTestDatabaseURL())
 
 	mt, err := New(config)
 	if err != nil {
@@ -210,8 +208,7 @@ func TestIntegration_TenantResolver(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer db.Close()
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = getTestDatabaseURL()
+	config := testConfig(getTestDatabaseURL())
 
 	mt, err := New(config)
 	if err != nil {
@@ -282,8 +279,7 @@ func TestIntegration_ConcurrentTenantOperations(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer db.Close()
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = getTestDatabaseURL()
+	config := testConfig(getTestDatabaseURL())
 
 	mt, err := New(config)
 	if err != nil {
@@ -370,8 +366,7 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer db.Close()
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = getTestDatabaseURL()
+	config := testConfig(getTestDatabaseURL())
 
 	mt, err := New(config)
 	if err != nil {
@@ -473,8 +468,7 @@ func TestIntegration_MasterTablesCreation(t *testing.T) {
 	db := setupTestDatabase(t)
 	defer db.Close()
 
-	config := tenant.DefaultConfig()
-	config.Database.DSN = getTestDatabaseURL()
+	config := testConfig(getTestDatabaseURL())
 
 	// Test that master tables are created automatically
 	mt, err := New(config)
