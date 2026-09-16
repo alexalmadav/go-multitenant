@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -273,7 +274,8 @@ func TestLimitChecker_LimitManagement(t *testing.T) {
 		t.Errorf("UpdateLimit() error = %v, want nil", err)
 	}
 
-	if val, err := limits.GetInt("test_limit"); err != nil || val != 10 {
+	// GetLimitsForPlan returns a snapshot, so re-fetch after mutating.
+	if val, err := checker.GetLimitsForPlan(PlanBasic).GetInt("test_limit"); err != nil || val != 10 {
 		t.Errorf("Updated limit incorrect: got %v, want 10", val)
 	}
 
@@ -283,7 +285,7 @@ func TestLimitChecker_LimitManagement(t *testing.T) {
 		t.Errorf("RemoveLimit() error = %v, want nil", err)
 	}
 
-	if limits.Has("test_limit") {
+	if checker.GetLimitsForPlan(PlanBasic).Has("test_limit") {
 		t.Error("Limit should be removed after RemoveLimit()")
 	}
 
@@ -603,4 +605,28 @@ func (m *MockUsageTracker) DecrementUsage(ctx context.Context, tenantID uuid.UUI
 
 func (m *MockUsageTracker) ResetUsage(ctx context.Context, tenantID uuid.UUID, limitName string) error {
 	return nil // Mock implementation
+}
+
+func TestLimitChecker_ConcurrentAddLimitAndCheckLimitIsRaceFree(t *testing.T) {
+	tenantID := uuid.New()
+	mockRepo := &MockLimitCheckerRepository{tenants: map[uuid.UUID]*Tenant{
+		tenantID: {ID: tenantID, PlanType: PlanBasic, Status: StatusActive},
+	}}
+	config := DefaultConfig().Limits
+	checker := NewLimitChecker(config, mockRepo, zaptest.NewLogger(t))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			_ = checker.AddLimit(PlanBasic, fmt.Sprintf("dyn_%d", i), LimitTypeInt, i)
+			checker.GetLimitSchema().AddDefinition(&LimitDefinition{Name: fmt.Sprintf("dyn_%d", i), Type: LimitTypeInt})
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		_ = checker.CheckLimit(context.Background(), tenantID, "max_projects", 1)
+		_ = checker.CheckAllLimits(context.Background(), tenantID)
+		_ = checker.ValidateLimits(PlanBasic, checker.GetLimitsForPlan(PlanBasic))
+	}
+	<-done
 }

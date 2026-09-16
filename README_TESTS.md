@@ -20,12 +20,22 @@ The test suite is organized into several categories:
 - **`tenant/limit_checker_test.go`** - Tests for limit checking and enforcement
 
 #### Database Package Tests
-- **`database/schema_test.go`** - Tests for schema management operations
-- **`database/migration_manager_test.go`** - Tests for migration management
+- **`database/schema_test.go`** - Schema naming and quoting (pure functions)
+- **`database/migration_manager_test.go`** - Migration file discovery and loading
+
+#### Middleware Tests
+- **`middleware/gin/middleware_test.go`** - Gin middleware behaviour with stubbed Manager/Resolver (httptest)
 
 ### 2. Integration Tests
 
-- **`integration_test.go`** - End-to-end tests requiring a PostgreSQL database
+Both files live in the root package and share one database discovery helper
+(`newTestDB`): `TEST_DATABASE_URL` if set, otherwise a local PostgreSQL on
+`localhost:5432`, otherwise a `postgres:16-alpine` container started with
+testcontainers (Docker required). They skip only under `-short` or when no
+database can be found.
+
+- **`database_integration_test.go`** - Schema isolation, search_path safety, connection reset, migrations, limit enforcement, schema listing
+- **`integration_test.go`** - Tenant lifecycle, resolver with real data, concurrent creation
 
 ## Running Tests
 
@@ -47,14 +57,15 @@ go test ./tenant -run TestValidateStatus
 Integration tests require a PostgreSQL database. Set up the database and environment:
 
 ```bash
-# Set database URL (optional - defaults shown)
+# Optional: point at an existing database. Without it, a local PostgreSQL on
+# localhost:5432 is used if present, otherwise a container is started via Docker.
 export TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
 
 # Run all tests including integration tests
 go test ./...
 
 # Run only integration tests
-go test . -run TestIntegration
+go test . -run 'TestIntegration|TestDatabase'
 ```
 
 ### Test Coverage
@@ -109,26 +120,29 @@ go tool cover -html=coverage.out -o coverage.html
 
 ### 6. Schema Manager (`database/schema_test.go`)
 
-- **Schema Naming**: Tests schema name generation
-- **Schema Operations**: Tests create, drop, exists operations (mocked)
-- **Search Path**: Tests PostgreSQL search path setting (mocked)
-- **Schema Listing**: Tests tenant schema enumeration (mocked)
+- **Schema Naming**: Tests schema name generation and identifier quoting
+- Create/drop/exists/list are covered against a real database in `database_integration_test.go`
 
 ### 7. Migration Manager (`database/migration_manager_test.go`)
 
 - **File Operations**: Tests loading migrations from filesystem
-- **Migration Application**: Tests applying migrations (mocked for DB operations)
-- **Rollback Operations**: Tests migration rollback (mocked)
 - **File Listing**: Tests discovering migration files
-- **Migration Tracking**: Tests applied migration tracking (mocked)
+- Apply, rollback, idempotency and bulk apply are covered against a real database in `database_integration_test.go`
 
-### 8. Integration Tests (`integration_test.go`)
+### 8. Middleware (`middleware/gin/middleware_test.go`)
 
-- **Full Lifecycle**: Tests complete tenant lifecycle with real database
-- **Schema Isolation**: Tests that tenant data is properly isolated
-- **Concurrent Operations**: Tests thread safety with multiple tenants
-- **Resolver Integration**: Tests tenant resolution with real data
-- **Master Tables**: Tests automatic creation of management tables
+- **ResolveTenant**: Skip paths, unresolvable tenant, context population
+- **ValidateTenant**: Status checks and authentication requirement
+- **EnforceLimits**: Limit violations map to 402 `PLAN_LIMIT_EXCEEDED`; other failures to 500
+
+### 9. Integration Tests (`integration_test.go`, `database_integration_test.go`)
+
+- **Full Lifecycle**: Complete tenant lifecycle with real database
+- **Schema Isolation**: Tenant tables, indexes, functions and triggers live only in the tenant schema
+- **Connection Safety**: `GetTenantConn` resets search_path on close; `WithTenantTx` isolation under concurrency
+- **Migrations**: Apply, idempotent re-apply, failure not recorded, rollback, bulk apply with partial failure
+- **Limits**: Default usage tracker rejects usage above plan limits
+- **Resolver Integration**: Tenant resolution with real data
 
 ## Mock Objects
 
@@ -148,7 +162,7 @@ For integration tests, you need a PostgreSQL database:
 
 ```bash
 # Start PostgreSQL in Docker
-docker run --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=test_multitenant -p 5432:5432 -d postgres:13
+docker run --name test-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=test_multitenant -p 5432:5432 -d postgres:16
 
 # Set environment variable
 export TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"

@@ -5,33 +5,11 @@ import (
 	"database/sql"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
 	"go.uber.org/zap/zaptest"
 )
-
-func TestNew(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	// In a real environment, you'd use testcontainers or similar
-	t.Skip("Skipping integration test - requires database")
-
-	config := tenant.DefaultConfig()
-	config.Database.DSN = "postgres://test:test@localhost:5432/test?sslmode=disable"
-
-	mt, err := New(config)
-	if err != nil {
-		t.Errorf("New() error = %v, want nil", err)
-		return
-	}
-
-	if mt == nil {
-		t.Error("New() should not return nil")
-	}
-
-	defer mt.Close()
-}
 
 func TestNew_InvalidConfig(t *testing.T) {
 	tests := []struct {
@@ -160,37 +138,6 @@ func TestSetupLogger(t *testing.T) {
 				t.Error("setupLogger() should not return nil logger")
 			}
 		})
-	}
-}
-
-func TestSetupDatabase(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping integration test - requires database")
-
-	config := tenant.DatabaseConfig{
-		Driver:          "postgres",
-		DSN:             "postgres://test:test@localhost:5432/test?sslmode=disable",
-		MaxOpenConns:    10,
-		MaxIdleConns:    5,
-		ConnMaxLifetime: 15 * time.Minute,
-		ConnMaxIdleTime: 5 * time.Minute,
-	}
-
-	db, err := setupDatabase(config)
-	if err != nil {
-		t.Errorf("setupDatabase() error = %v, want nil", err)
-		return
-	}
-
-	if db == nil {
-		t.Error("setupDatabase() should not return nil")
-	}
-
-	defer db.Close()
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		t.Errorf("Database ping failed: %v", err)
 	}
 }
 
@@ -378,8 +325,12 @@ func (m *MockMultiTenantManager) GetTenantDB(ctx context.Context, tenantID uuid.
 	return &sql.DB{}, nil
 }
 
-func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, error) {
+func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*tenant.Conn, error) {
 	return nil, nil
+}
+
+func (m *MockMultiTenantManager) LimitChecker() tenant.LimitChecker {
+	return nil
 }
 
 func (m *MockMultiTenantManager) WithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(tx *sql.Tx) error) error {
@@ -418,3 +369,14 @@ func (m *MockMultiTenantResolver) ValidateSubdomain(subdomain string) error {
 }
 
 // MockGinMiddleware removed as it's not needed for these tests
+
+func TestReExportedErrorTypes(t *testing.T) {
+	var tenantErr error = &TenantError{Code: "X", Message: "x"}
+	var validationErr error = &ValidationError{Field: "f", Message: "m"}
+	if _, ok := tenantErr.(*tenant.TenantError); !ok {
+		t.Error("multitenant.TenantError should alias tenant.TenantError")
+	}
+	if _, ok := validationErr.(*tenant.ValidationError); !ok {
+		t.Error("multitenant.ValidationError should alias tenant.ValidationError")
+	}
+}

@@ -54,7 +54,7 @@ schema.AddDefinition(&tenant.LimitDefinition{
     DisplayName:  "Video Processing Minutes", 
     Description:  "Monthly allowance for video processing",
     Type:         tenant.LimitTypeInt,
-    DefaultValue: 60,
+    DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 60},
     Required:     false,
     Category:     "media",
 })
@@ -75,7 +75,7 @@ schema.AddDefinition(&tenant.LimitDefinition{
     DisplayName:  "AI Model API Calls",
     Description:  "Monthly AI model API call allowance", 
     Type:         tenant.LimitTypeInt,
-    DefaultValue: 1000,
+    DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 1000},
     Category:     "ai",
 })
 

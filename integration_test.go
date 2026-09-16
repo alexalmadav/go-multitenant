@@ -4,53 +4,35 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
+	"strings"
 	"testing"
 
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/stdlib"
 )
 
-// Integration tests require a PostgreSQL database
-// Set TEST_DATABASE_URL environment variable to run these tests
-// Example: TEST_DATABASE_URL=postgres://user:password@localhost:5432/testdb?sslmode=disable
+// Integration tests use the same database discovery as
+// database_integration_test.go: TEST_DATABASE_URL, then a local PostgreSQL,
+// then a testcontainers-managed postgres:16 instance.
+
+// testDSN is the DSN of the database most recently opened by setupTestDatabase.
+var testDSN string
 
 func getTestDatabaseURL() string {
-	url := os.Getenv("TEST_DATABASE_URL")
-	if url == "" {
-		return "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
-	}
-	return url
+	return testDSN
 }
 
 func setupTestDatabase(t *testing.T) *sql.DB {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
-
-	dbURL := getTestDatabaseURL()
-	connConfig, err := pgx.ParseConfig(dbURL)
-	if err != nil {
-		t.Skipf("Skipping integration test - cannot parse database URL: %v", err)
-	}
-	connConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-
-	db := stdlib.OpenDB(*connConfig)
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		t.Skipf("Skipping integration test - database ping failed: %v", err)
-	}
-
-	return db
+	tdb := newTestDB(t)
+	t.Cleanup(tdb.close)
+	testDSN = tdb.dsn
+	return tdb.db
 }
 
 func cleanupTestData(db *sql.DB, tenantIDs []uuid.UUID) {
 	// Drop tenant schemas
 	for _, tenantID := range tenantIDs {
-		schemaName := fmt.Sprintf("tenant_%s", tenantID.String())
+		schemaName := fmt.Sprintf("tenant_%s", strings.ReplaceAll(tenantID.String(), "-", "_"))
 		schemaName = "\"" + schemaName + "\""
 		_, _ = db.Exec(fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", schemaName))
 	}

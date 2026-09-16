@@ -3,14 +3,21 @@ package multitenant
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alexalmadav/go-multitenant/database"
+	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/alexalmadav/go-multitenant/tenant"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -74,6 +81,7 @@ type testDB struct {
 	logger    *zap.Logger
 	t         *testing.T
 	container *postgresContainer
+	dsn       string
 }
 
 // newTestDB creates a new test database connection using testcontainers
@@ -107,6 +115,7 @@ func newTestDB(t *testing.T) *testDB {
 			db:     db,
 			logger: zaptest.NewLogger(t),
 			t:      t,
+			dsn:    dbURL,
 		}
 	}
 
@@ -119,6 +128,7 @@ func newTestDB(t *testing.T) *testDB {
 			db:     db,
 			logger: zaptest.NewLogger(t),
 			t:      t,
+			dsn:    defaultURL,
 		}
 	}
 
@@ -140,6 +150,7 @@ func newTestDB(t *testing.T) *testDB {
 		logger:    zaptest.NewLogger(t),
 		t:         t,
 		container: container,
+		dsn:       container.ConnectionString,
 	}
 }
 
@@ -153,10 +164,7 @@ func (tdb *testDB) close() {
 }
 
 func (tdb *testDB) getConnectionString() string {
-	if tdb.container != nil {
-		return tdb.container.ConnectionString
-	}
-	return os.Getenv("TEST_DATABASE_URL")
+	return tdb.dsn
 }
 
 // cleanupSchema drops a tenant schema and any tables that leaked to public
@@ -1491,5 +1499,715 @@ func TestDatabase_WithTenantTx_ConcurrentIsolation(t *testing.T) {
 		}
 	} else {
 		t.Logf("All %d tenants correctly isolated during concurrent WithTenantTx operations", numTenants)
+	}
+}
+
+// TestDatabase_GetTenantConn_ResetsSearchPathOnClose verifies that a connection
+// returned to the pool after GetTenantConn does not keep the tenant search_path.
+func TestDatabase_GetTenantConn_ResetsSearchPathOnClose(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	// Force every query through the same underlying connection so a leaked
+	// session setting is guaranteed to be observed.
+	config.Database.MaxOpenConns = 1
+	config.Database.MaxIdleConns = 1
+
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create MultiTenant: %v", err)
+	}
+	defer mt.Close()
+
+	ctx := context.Background()
+	tenantID := uuid.New()
+	defer cleanupTestData(tdb.db, []uuid.UUID{tenantID})
+
+	testTenant := &tenant.Tenant{
+		ID:        tenantID,
+		Name:      "Reset SearchPath Tenant",
+		Subdomain: fmt.Sprintf("reset-sp-%s", tenantID.String()[:8]),
+		PlanType:  tenant.PlanBasic,
+	}
+	if err := mt.Manager.CreateTenant(ctx, testTenant); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, tenantID); err != nil {
+		t.Fatalf("ProvisionTenant failed: %v", err)
+	}
+
+	conn, err := mt.Manager.GetTenantConn(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("GetTenantConn failed: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("conn.Close failed: %v", err)
+	}
+
+	var searchPath string
+	if err := mt.GetDatabase().QueryRowContext(ctx, "SHOW search_path").Scan(&searchPath); err != nil {
+		t.Fatalf("Failed to read pool search_path: %v", err)
+	}
+
+	tenantSchema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(tenantID.String(), "-", "_"))
+	if strings.Contains(searchPath, tenantSchema) {
+		t.Errorf("pool connection still has tenant search_path after GetTenantConn close: %s", searchPath)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Migration tests (pure-Go migration manager)
+// ---------------------------------------------------------------------------
+
+// migrationTestEnv provisions n active tenants and returns the MultiTenant plus their IDs.
+func migrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uuid.UUID) {
+	t.Helper()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("Failed to create MultiTenant: %v", err)
+	}
+	ctx := context.Background()
+	var ids []uuid.UUID
+	for i := 0; i < n; i++ {
+		id := uuid.New()
+		tt := &tenant.Tenant{
+			ID:        id,
+			Name:      fmt.Sprintf("Migration Tenant %d", i),
+			Subdomain: fmt.Sprintf("mig-%s", id.String()[:8]),
+			PlanType:  tenant.PlanBasic,
+		}
+		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
+			t.Fatalf("CreateTenant failed: %v", err)
+		}
+		if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+			t.Fatalf("ProvisionTenant failed: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() {
+		cleanupTestData(tdb.db, ids)
+		mt.Close()
+	})
+	return mt, ids
+}
+
+func widgetsMigration() *tenant.Migration {
+	rollback := "DROP TABLE widgets"
+	return &tenant.Migration{
+		Version:     "001",
+		Name:        "create_widgets",
+		SQL:         "CREATE TABLE widgets (id SERIAL PRIMARY KEY, name TEXT NOT NULL)",
+		RollbackSQL: &rollback,
+	}
+}
+
+func TestDatabase_Migrations_ApplyCreatesTableInTenantSchemaAndRecordsIt(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	tenantID := ids[0]
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(tenantID.String(), "-", "_"))
+
+	if err := mt.Migrations.ApplyMigration(ctx, tenantID, widgetsMigration()); err != nil {
+		t.Fatalf("ApplyMigration failed: %v", err)
+	}
+
+	inTenant, _ := tdb.tableExistsInSchema(schema, "widgets")
+	if !inTenant {
+		t.Errorf("widgets table should exist in %s", schema)
+	}
+	inPublic, _ := tdb.tableExistsInSchema("public", "widgets")
+	if inPublic {
+		t.Errorf("widgets table must not leak into public")
+	}
+
+	applied, err := mt.Migrations.IsMigrationApplied(ctx, tenantID, "001")
+	if err != nil || !applied {
+		t.Errorf("IsMigrationApplied = %v, %v; want true, nil", applied, err)
+	}
+
+	list, err := mt.Migrations.GetAppliedMigrations(ctx, tenantID)
+	if err != nil {
+		t.Fatalf("GetAppliedMigrations failed: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected 1 applied migration, got %d", len(list))
+	}
+	if list[0].Version != "001" || list[0].Name != "create_widgets" {
+		t.Errorf("unexpected migration record: %+v", list[0])
+	}
+	if list[0].Checksum == nil || len(*list[0].Checksum) != 64 {
+		t.Errorf("expected sha256 checksum to be recorded, got %v", list[0].Checksum)
+	}
+	if list[0].AppliedAt.IsZero() {
+		t.Errorf("expected applied_at to be set")
+	}
+}
+
+func TestDatabase_Migrations_ApplyIsIdempotent(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	for i := 0; i < 2; i++ {
+		if err := mt.Migrations.ApplyMigration(ctx, ids[0], widgetsMigration()); err != nil {
+			t.Fatalf("ApplyMigration #%d failed: %v", i+1, err)
+		}
+	}
+	list, _ := mt.Migrations.GetAppliedMigrations(ctx, ids[0])
+	if len(list) != 1 {
+		t.Errorf("expected exactly 1 record after re-apply, got %d", len(list))
+	}
+}
+
+func TestDatabase_Migrations_FailedMigrationIsNotRecorded(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	bad := &tenant.Migration{Version: "002", Name: "broken", SQL: "CREATE TABLE ("}
+	if err := mt.Migrations.ApplyMigration(ctx, ids[0], bad); err == nil {
+		t.Fatalf("expected error applying invalid SQL")
+	}
+	applied, _ := mt.Migrations.IsMigrationApplied(ctx, ids[0], "002")
+	if applied {
+		t.Errorf("failed migration must not be recorded as applied")
+	}
+}
+
+func TestDatabase_Migrations_ApplyFailsWhenSchemaMissing(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, _ := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	unprovisioned := uuid.New()
+	tt := &tenant.Tenant{ID: unprovisioned, Name: "Unprovisioned", Subdomain: fmt.Sprintf("unprov-%s", unprovisioned.String()[:8])}
+	if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Migrations.ApplyMigration(ctx, unprovisioned, widgetsMigration()); err == nil {
+		t.Fatalf("expected error when tenant schema does not exist")
+	}
+}
+
+func TestDatabase_Migrations_RollbackRunsRollbackSQLAndRemovesRecord(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(ids[0].String(), "-", "_"))
+
+	if err := mt.Migrations.ApplyMigration(ctx, ids[0], widgetsMigration()); err != nil {
+		t.Fatalf("ApplyMigration failed: %v", err)
+	}
+	if err := mt.Migrations.RollbackMigration(ctx, ids[0], "001"); err != nil {
+		t.Fatalf("RollbackMigration failed: %v", err)
+	}
+	exists, _ := tdb.tableExistsInSchema(schema, "widgets")
+	if exists {
+		t.Errorf("widgets table should have been dropped by rollback")
+	}
+	applied, _ := mt.Migrations.IsMigrationApplied(ctx, ids[0], "001")
+	if applied {
+		t.Errorf("migration should no longer be recorded after rollback")
+	}
+}
+
+func TestDatabase_Migrations_RollbackWithoutRollbackSQLFails(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	m := widgetsMigration()
+	m.RollbackSQL = nil
+	if err := mt.Migrations.ApplyMigration(ctx, ids[0], m); err != nil {
+		t.Fatalf("ApplyMigration failed: %v", err)
+	}
+	if err := mt.Migrations.RollbackMigration(ctx, ids[0], "001"); err == nil {
+		t.Fatalf("expected error rolling back a migration with no rollback SQL")
+	}
+	applied, _ := mt.Migrations.IsMigrationApplied(ctx, ids[0], "001")
+	if !applied {
+		t.Errorf("migration record must remain when rollback fails")
+	}
+}
+
+func TestDatabase_Migrations_ApplyToAllTenants_SkipsInactiveAndReportsFailures(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 3)
+	ctx := context.Background()
+	okID, suspendedID, brokenID := ids[0], ids[1], ids[2]
+
+	if err := mt.Manager.SuspendTenant(ctx, suspendedID); err != nil {
+		t.Fatalf("SuspendTenant failed: %v", err)
+	}
+	// Make brokenID fail by removing its schema out from under the manager.
+	brokenSchema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(brokenID.String(), "-", "_"))
+	if _, err := tdb.db.Exec(fmt.Sprintf(`DROP SCHEMA "%s" CASCADE`, brokenSchema)); err != nil {
+		t.Fatalf("failed to drop schema: %v", err)
+	}
+
+	err := mt.Migrations.ApplyToAllTenants(ctx, widgetsMigration())
+	if err == nil {
+		t.Fatalf("expected an error because one tenant's schema is missing")
+	}
+	if !strings.Contains(err.Error(), brokenID.String()) {
+		t.Errorf("error should name the failing tenant %s, got: %v", brokenID, err)
+	}
+
+	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, okID, "001"); !applied {
+		t.Errorf("active tenant should have received the migration")
+	}
+	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, suspendedID, "001"); applied {
+		t.Errorf("suspended tenant should not receive the migration")
+	}
+	if applied, _ := mt.Migrations.IsMigrationApplied(ctx, brokenID, "001"); applied {
+		t.Errorf("tenant without schema must not be recorded as migrated")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Limit enforcement tests
+// ---------------------------------------------------------------------------
+
+func TestDatabase_Limits_ProjectCountAboveBasicPlanIsRejected(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	tenantID := ids[0]
+
+	// Basic plan allows 10 projects; insert 11.
+	err := mt.Manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		for i := 0; i < 11; i++ {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", fmt.Sprintf("p%d", i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to seed projects: %v", err)
+	}
+
+	_, err = mt.Manager.CheckLimits(ctx, tenantID)
+	if err == nil {
+		t.Fatalf("expected CheckLimits to fail with 11 projects on the basic plan")
+	}
+	var tenantErr *tenant.TenantError
+	if !errors.As(err, &tenantErr) || tenantErr.Code != "LIMIT_EXCEEDED" {
+		t.Errorf("expected LIMIT_EXCEEDED TenantError, got: %v", err)
+	}
+}
+
+func TestDatabase_Limits_ProjectCountAtBasicPlanLimitIsAllowed(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	tenantID := ids[0]
+
+	err := mt.Manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		for i := 0; i < 10; i++ {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", fmt.Sprintf("p%d", i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to seed projects: %v", err)
+	}
+
+	if _, err := mt.Manager.CheckLimits(ctx, tenantID); err != nil {
+		t.Errorf("10 projects should be within the basic plan limit, got: %v", err)
+	}
+}
+
+func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	checker := mt.Manager.LimitChecker()
+	if checker == nil {
+		t.Fatalf("Manager.LimitChecker() returned nil")
+	}
+	if checker.GetUsageTracker() == nil {
+		t.Fatalf("New() should wire a default usage tracker")
+	}
+
+	// Tighten the basic plan at runtime and verify it takes effect.
+	if err := checker.UpdateLimit(tenant.PlanBasic, "max_projects", 0); err != nil {
+		t.Fatalf("UpdateLimit failed: %v", err)
+	}
+	err := mt.Manager.WithTenantTx(ctx, ids[0], func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ('only')")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("failed to seed project: %v", err)
+	}
+	if _, err := mt.Manager.CheckLimits(ctx, ids[0]); err == nil {
+		t.Errorf("expected failure after lowering max_projects to 0")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Schema listing
+// ---------------------------------------------------------------------------
+
+func TestDatabase_ListTenantSchemas_OnlyMatchesPrefixLiterally(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+	want := fmt.Sprintf("tenant_%s", strings.ReplaceAll(ids[0].String(), "-", "_"))
+
+	// "_" is a LIKE wildcard; a schema named tenantXdecoy must not be listed
+	// for the prefix "tenant_".
+	decoy := fmt.Sprintf("tenantXdecoy_%s", ids[0].String()[:8])
+	if _, err := tdb.db.Exec(fmt.Sprintf(`CREATE SCHEMA "%s"`, decoy)); err != nil {
+		t.Fatalf("failed to create decoy schema: %v", err)
+	}
+	t.Cleanup(func() { _, _ = tdb.db.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS "%s" CASCADE`, decoy)) })
+
+	sm := database.NewSchemaManager(mt.GetDatabase(), tdb.logger, "tenant_")
+	schemas, err := sm.ListTenantSchemas(ctx)
+	if err != nil {
+		t.Fatalf("ListTenantSchemas failed: %v", err)
+	}
+
+	found := false
+	for _, s := range schemas {
+		if s == want {
+			found = true
+		}
+		if s == decoy {
+			t.Errorf("ListTenantSchemas returned %q, which does not start with the literal prefix tenant_", s)
+		}
+	}
+	if !found {
+		t.Errorf("ListTenantSchemas did not include provisioned schema %s (got %v)", want, schemas)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// SetTenantDB middleware
+// ---------------------------------------------------------------------------
+
+// tenantRouter builds a Gin router that resolves the tenant from the X-Tenant
+// header and hands the handler a dedicated tenant connection.
+func tenantRouter(mt *MultiTenant, handler gin.HandlerFunc) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	mw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{})
+	r := gin.New()
+	r.Use(mw.ResolveTenant(), mw.SetTenantDB())
+	r.GET("/count", handler)
+	return r
+}
+
+func countProjectsHandler(c *gin.Context) {
+	conn, ok := ginmiddleware.GetTenantConnFromContext(c)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "no tenant conn"})
+		return
+	}
+	var n int
+	if err := conn.QueryRowContext(c.Request.Context(), "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"count": n})
+}
+
+func seedProjects(t *testing.T, mt *MultiTenant, tenantID uuid.UUID, n int) {
+	t.Helper()
+	err := mt.Manager.WithTenantTx(context.Background(), tenantID, func(tx *sql.Tx) error {
+		for i := 0; i < n; i++ {
+			if _, err := tx.ExecContext(context.Background(), "INSERT INTO projects (name) VALUES ($1)", fmt.Sprintf("p%d", i)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("failed to seed projects for %s: %v", tenantID, err)
+	}
+}
+
+func TestDatabase_SetTenantDB_HandlerSeesOnlyResolvedTenantsRows(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	config.Resolver.Strategy = tenant.ResolverHeader
+	config.Resolver.HeaderName = "X-Tenant"
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer mt.Close()
+	ctx := context.Background()
+
+	var ids []uuid.UUID
+	var subs []string
+	for i, n := range []int{2, 5} {
+		id := uuid.New()
+		sub := fmt.Sprintf("mw-%d-%s", i, id.String()[:8])
+		tt := &tenant.Tenant{ID: id, Name: sub, Subdomain: sub, PlanType: tenant.PlanBasic}
+		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
+			t.Fatalf("CreateTenant failed: %v", err)
+		}
+		if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+			t.Fatalf("ProvisionTenant failed: %v", err)
+		}
+		seedProjects(t, mt, id, n)
+		ids = append(ids, id)
+		subs = append(subs, sub)
+	}
+	defer cleanupTestData(tdb.db, ids)
+
+	r := tenantRouter(mt, countProjectsHandler)
+	for i, want := range []int{2, 5} {
+		req := httptest.NewRequest(http.MethodGet, "/count", nil)
+		req.Header.Set("X-Tenant", subs[i])
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+
+		var body struct{ Count int }
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if rec.Code != http.StatusOK || body.Count != want {
+			t.Errorf("tenant %s: got %d %s, want 200 count=%d", subs[i], rec.Code, rec.Body.String(), want)
+		}
+	}
+}
+
+func TestDatabase_SetTenantDB_ReleasesConnectionWithCleanSearchPath(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	config.Database.MaxOpenConns = 1
+	config.Database.MaxIdleConns = 1
+	config.Resolver.Strategy = tenant.ResolverHeader
+	config.Resolver.HeaderName = "X-Tenant"
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer mt.Close()
+	ctx := context.Background()
+
+	id := uuid.New()
+	sub := fmt.Sprintf("mw-rel-%s", id.String()[:8])
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: id, Name: sub, Subdomain: sub}); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatalf("ProvisionTenant failed: %v", err)
+	}
+	defer cleanupTestData(tdb.db, []uuid.UUID{id})
+
+	r := tenantRouter(mt, countProjectsHandler)
+	req := httptest.NewRequest(http.MethodGet, "/count", nil)
+	req.Header.Set("X-Tenant", sub)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request failed: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// With a single-connection pool, the request's connection is the only one.
+	// If it were still held or still carried the tenant search_path, this
+	// query would block or see the tenant schema.
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var searchPath string
+	if err := mt.GetDatabase().QueryRowContext(qctx, "SHOW search_path").Scan(&searchPath); err != nil {
+		t.Fatalf("pool query after request failed (connection not released?): %v", err)
+	}
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(id.String(), "-", "_"))
+	if strings.Contains(searchPath, schema) {
+		t.Errorf("pool connection still carries tenant search_path after request: %s", searchPath)
+	}
+}
+
+// SetTenantDB must pass requests through when no tenant was resolved, so
+// skipped paths such as /health keep working; the handler simply gets no conn.
+func TestDatabase_SetTenantDB_WithoutResolvedTenantPassesThroughWithoutConn(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, _ := migrationTestEnv(t, tdb, 0)
+
+	gin.SetMode(gin.TestMode)
+	mw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{SkipPaths: []string{"/health"}})
+	r := gin.New()
+	r.Use(mw.ResolveTenant(), mw.SetTenantDB())
+	var hadConn, reached bool
+	r.GET("/health", func(c *gin.Context) {
+		reached = true
+		_, hadConn = ginmiddleware.GetTenantConnFromContext(c)
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if rec.Code != http.StatusOK || !reached {
+		t.Errorf("skipped path should reach the handler, got %d", rec.Code)
+	}
+	if hadConn {
+		t.Errorf("no tenant connection should be set when no tenant was resolved")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// File-based migration helpers
+// ---------------------------------------------------------------------------
+
+func writeMigrationFiles(t *testing.T, dir, version, name, up, down string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_%s.up.sql", version, name)), []byte(up), 0o644); err != nil {
+		t.Fatalf("write up file: %v", err)
+	}
+	if down != "" {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%s_%s.down.sql", version, name)), []byte(down), 0o644); err != nil {
+			t.Fatalf("write down file: %v", err)
+		}
+	}
+}
+
+func fileMigrationEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, *database.MigrationManager, []uuid.UUID, string) {
+	t.Helper()
+	dir := t.TempDir()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := tenant.DefaultConfig()
+	config.Database.DSN = connStr
+	config.Database.MigrationsDir = dir
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	ctx := context.Background()
+	var ids []uuid.UUID
+	for i := 0; i < n; i++ {
+		id := uuid.New()
+		sub := fmt.Sprintf("fmig-%d-%s", i, id.String()[:8])
+		if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: id, Name: sub, Subdomain: sub}); err != nil {
+			t.Fatalf("CreateTenant failed: %v", err)
+		}
+		if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+			t.Fatalf("ProvisionTenant failed: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	t.Cleanup(func() { cleanupTestData(tdb.db, ids); mt.Close() })
+	mm, ok := mt.Migrations.(*database.MigrationManager)
+	if !ok {
+		t.Fatalf("Migrations is %T, want *database.MigrationManager", mt.Migrations)
+	}
+	return mt, mm, ids, dir
+}
+
+func TestDatabase_MigrationFiles_ApplyFromFileAppliesUpAndRecordsDown(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	_, mm, ids, dir := fileMigrationEnv(t, tdb, 1)
+	ctx := context.Background()
+	writeMigrationFiles(t, dir, "001", "create_gadgets",
+		"CREATE TABLE gadgets (id SERIAL PRIMARY KEY)", "DROP TABLE gadgets")
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(ids[0].String(), "-", "_"))
+
+	if err := mm.ApplyMigrationFromFile(ctx, ids[0], "001", "create_gadgets"); err != nil {
+		t.Fatalf("ApplyMigrationFromFile failed: %v", err)
+	}
+
+	if exists, _ := tdb.tableExistsInSchema(schema, "gadgets"); !exists {
+		t.Errorf("gadgets table should exist in %s", schema)
+	}
+	applied, err := mm.GetAppliedMigrations(ctx, ids[0])
+	if err != nil || len(applied) != 1 {
+		t.Fatalf("GetAppliedMigrations = %v, %v; want one record", applied, err)
+	}
+	if applied[0].RollbackSQL == nil || *applied[0].RollbackSQL != "DROP TABLE gadgets" {
+		t.Errorf("rollback SQL from .down.sql should be recorded, got %v", applied[0].RollbackSQL)
+	}
+	if err := mm.RollbackMigration(ctx, ids[0], "001"); err != nil {
+		t.Fatalf("RollbackMigration failed: %v", err)
+	}
+	if exists, _ := tdb.tableExistsInSchema(schema, "gadgets"); exists {
+		t.Errorf("gadgets table should be dropped after rollback")
+	}
+}
+
+func TestDatabase_MigrationFiles_ApplyFromFileMissingFileFails(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	_, mm, ids, _ := fileMigrationEnv(t, tdb, 1)
+
+	err := mm.ApplyMigrationFromFile(context.Background(), ids[0], "999", "does_not_exist")
+	if err == nil {
+		t.Fatalf("expected error for missing migration file")
+	}
+	if applied, _ := mm.IsMigrationApplied(context.Background(), ids[0], "999"); applied {
+		t.Errorf("nothing should be recorded for a missing file")
+	}
+}
+
+func TestDatabase_MigrationFiles_ApplyToAllTenantsFromFile(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	_, mm, ids, dir := fileMigrationEnv(t, tdb, 2)
+	ctx := context.Background()
+	writeMigrationFiles(t, dir, "002", "create_gizmos", "CREATE TABLE gizmos (id SERIAL PRIMARY KEY)", "")
+
+	if err := mm.ApplyMigrationToAllTenantsFromFile(ctx, "002", "create_gizmos"); err != nil {
+		t.Fatalf("ApplyMigrationToAllTenantsFromFile failed: %v", err)
+	}
+
+	for _, id := range ids {
+		schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(id.String(), "-", "_"))
+		if exists, _ := tdb.tableExistsInSchema(schema, "gizmos"); !exists {
+			t.Errorf("gizmos table missing in %s", schema)
+		}
+		if applied, _ := mm.IsMigrationApplied(ctx, id, "002"); !applied {
+			t.Errorf("migration 002 not recorded for %s", id)
+		}
+	}
+	files, err := mm.ListMigrationFiles()
+	if err != nil || len(files) != 1 || files[0] != "002_create_gizmos" {
+		t.Errorf("ListMigrationFiles = %v, %v; want [002_create_gizmos]", files, err)
 	}
 }

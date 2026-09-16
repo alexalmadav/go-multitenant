@@ -102,19 +102,26 @@ func main() {
 ### Advanced Usage with Billing
 
 ```go
-// Configure custom plan limits
-config.Limits.PlanLimits = map[string]*multitenant.Limits{
-    multitenant.PlanBasic: {
-        MaxUsers:     5,
-        MaxProjects:  10,
-        MaxStorageGB: 1,
-    },
-    multitenant.PlanPro: {
-        MaxUsers:     25,
-        MaxProjects:  100,
-        MaxStorageGB: 10,
-    },
+// Configure custom plan limits (-1 means unlimited)
+basic := make(tenant.FlexibleLimits)
+basic.Set("max_users", tenant.LimitTypeInt, 5)
+basic.Set("max_projects", tenant.LimitTypeInt, 10)
+basic.Set("max_storage_gb", tenant.LimitTypeInt, 1)
+
+pro := make(tenant.FlexibleLimits)
+pro.Set("max_users", tenant.LimitTypeInt, 25)
+pro.Set("max_projects", tenant.LimitTypeInt, 100)
+pro.Set("max_storage_gb", tenant.LimitTypeInt, 10)
+
+config.Limits.PlanLimits = map[string]tenant.FlexibleLimits{
+    multitenant.PlanBasic: basic,
+    multitenant.PlanPro:   pro,
 }
+
+// Limits are checked against live counts in the tenant schema (projects,
+// active tenant_users). Swap in your own tracker or add limits at runtime:
+mt.Manager.LimitChecker().SetUsageTracker(myTracker)
+mt.Manager.LimitChecker().AddLimit(multitenant.PlanPro, "beta_features", tenant.LimitTypeBool, true)
 
 // Create middleware with custom error handling
 ginConfig := ginmiddleware.Config{
@@ -195,14 +202,11 @@ config.Resolver = multitenant.ResolverConfig{
 ### Limits Configuration
 
 ```go
-config.Limits = multitenant.LimitsConfig{
+config.Limits = tenant.LimitsConfig{
     EnforceLimits: true,
-    PlanLimits: map[string]*multitenant.Limits{
-        multitenant.PlanBasic: {
-            MaxUsers:     5,
-            MaxProjects:  10,
-            MaxStorageGB: 1,
-        },
+    DefaultPlan:   multitenant.PlanBasic,
+    PlanLimits: map[string]tenant.FlexibleLimits{
+        multitenant.PlanBasic: basic, // see FLEXIBLE_LIMITS.md
         // ... more plans
     },
 }
@@ -245,13 +249,14 @@ admin.Use(mt.GinMiddleware.RequireAdmin())
 ### Tenant-Aware Database Operations
 
 ```go
-// In your handlers, the database context is automatically set
+// With SetTenantDB in the chain, each request gets a dedicated connection
+// whose search_path is the tenant schema. It is released when the request ends.
 func getProjects(c *gin.Context) {
-    // Database queries are automatically scoped to the tenant
-    db, _ := ginmiddleware.GetTenantDBFromContext(c)
-    
-    // This query only returns projects for the current tenant
-    rows, err := db.Query("SELECT * FROM projects WHERE status = $1", "active")
+    conn, _ := ginmiddleware.GetTenantConnFromContext(c)
+
+    // This query only sees the current tenant's projects
+    rows, err := conn.QueryContext(c.Request.Context(),
+        "SELECT * FROM projects WHERE status = $1", "active")
     // ...
 }
 ```
@@ -259,9 +264,17 @@ func getProjects(c *gin.Context) {
 ### Manual Tenant Context
 
 ```go
-// For background jobs or non-HTTP contexts
-ctx := mt.Manager.WithTenantContext(context.Background(), tenantID)
-db, err := mt.Manager.GetTenantDB(ctx, tenantID)
+// For background jobs or non-HTTP contexts, run inside a transaction
+// scoped to the tenant schema:
+err := mt.Manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+    _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", name)
+    return err
+})
+
+// Or hold a dedicated connection; Close() resets search_path before
+// returning it to the pool.
+conn, err := mt.Manager.GetTenantConn(ctx, tenantID)
+defer conn.Close()
 ```
 
 ## 📋 Tenant Management

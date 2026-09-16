@@ -20,6 +20,7 @@ import (
 type MultiTenant struct {
 	Manager       tenant.Manager
 	Resolver      tenant.Resolver
+	Migrations    tenant.MigrationManager
 	GinMiddleware *ginmiddleware.Middleware
 	db            *sql.DB
 	logger        *zap.Logger
@@ -50,12 +51,14 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Create schema manager
 	schemaManager := database.NewSchemaManager(db, logger, config.Database.SchemaPrefix)
 
-	// Create migration manager using PostgreSQL functions
+	// Create migration manager
 	// Note: Applications should specify their own migrations directory path
-	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir)
+	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir, schemaManager, repository)
 
-	// Create limit checker
+	// Create limit checker with a usage tracker that counts rows in the tenant schema.
+	// Applications can replace it via Manager.LimitChecker().SetUsageTracker.
 	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
+	limitChecker.SetUsageTracker(postgres.NewUsageTracker(db, schemaManager, logger))
 
 	// Create tenant manager
 	manager := tenant.NewManager(config, db, repository, schemaManager, migrationMgr, limitChecker, logger)
@@ -73,6 +76,7 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	return &MultiTenant{
 		Manager:       manager,
 		Resolver:      resolver,
+		Migrations:    migrationMgr,
 		GinMiddleware: ginMw,
 		db:            db,
 		logger:        logger,
@@ -178,6 +182,9 @@ type (
 	Limits    = tenant.Limits
 	Stats     = tenant.Stats
 	Migration = tenant.Migration
+
+	TenantError     = tenant.TenantError
+	ValidationError = tenant.ValidationError
 )
 
 // Re-export key constants

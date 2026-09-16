@@ -9,6 +9,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant"
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
+	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -25,23 +26,11 @@ func main() {
 	config.Resolver.Strategy = multitenant.ResolverSubdomain
 	config.Resolver.Domain = "saas.example.com"
 
-	// Configure custom plan limits
-	config.Limits.PlanLimits = map[string]*multitenant.Limits{
-		multitenant.PlanBasic: {
-			MaxUsers:     2,
-			MaxProjects:  3,
-			MaxStorageGB: 1,
-		},
-		multitenant.PlanPro: {
-			MaxUsers:     10,
-			MaxProjects:  25,
-			MaxStorageGB: 5,
-		},
-		multitenant.PlanEnterprise: {
-			MaxUsers:     -1, // unlimited
-			MaxProjects:  -1, // unlimited
-			MaxStorageGB: 50,
-		},
+	// Configure custom plan limits (-1 means unlimited)
+	config.Limits.PlanLimits = map[string]tenant.FlexibleLimits{
+		multitenant.PlanBasic:      planLimits(2, 3, 1),
+		multitenant.PlanPro:        planLimits(10, 25, 5),
+		multitenant.PlanEnterprise: planLimits(-1, -1, 50),
 	}
 
 	// Initialize multi-tenant system
@@ -446,6 +435,10 @@ func requestPlanUpgrade(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid tenant ID"})
 			return
 		}
+		if _, err := mt.Manager.GetTenant(c.Request.Context(), tenantID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Tenant not found"})
+			return
+		}
 
 		// In a real application, this would handle payment processing
 		// For now, we'll just simulate the upgrade request
@@ -581,4 +574,13 @@ func isValidUpgrade(currentPlan, newPlan string) bool {
 	new, exists2 := planOrder[newPlan]
 
 	return exists1 && exists2 && new > current
+}
+
+// planLimits builds a FlexibleLimits for the three classic limits.
+func planLimits(maxUsers, maxProjects, maxStorageGB int) tenant.FlexibleLimits {
+	l := make(tenant.FlexibleLimits)
+	l.Set("max_users", tenant.LimitTypeInt, maxUsers)
+	l.Set("max_projects", tenant.LimitTypeInt, maxProjects)
+	l.Set("max_storage_gb", tenant.LimitTypeInt, maxStorageGB)
+	return l
 }

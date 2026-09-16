@@ -1,7 +1,7 @@
 package gin
 
 import (
-	"database/sql"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -215,12 +215,14 @@ func (m *Middleware) EnforceLimits() gin.HandlerFunc {
 				zap.String("tenant_id", tenantCtx.TenantID.String()),
 				zap.Error(err))
 
-			// Determine error type and response
-			if strings.Contains(err.Error(), "limit exceeded") {
+			// A limit violation is a TenantError with a known code; anything
+			// else is an infrastructure failure.
+			var tenantErr *tenant.TenantError
+			if errors.As(err, &tenantErr) && (tenantErr.Code == "LIMIT_EXCEEDED" || tenantErr.Code == "FEATURE_NOT_ALLOWED") {
 				m.config.ErrorHandler(c, &tenant.TenantError{
 					TenantID: tenantCtx.TenantID,
 					Code:     "PLAN_LIMIT_EXCEEDED",
-					Message:  err.Error(),
+					Message:  tenantErr.Message,
 				})
 			} else {
 				m.config.ErrorHandler(c, &tenant.TenantError{
@@ -371,13 +373,13 @@ func GetTenantLimitsFromContext(c *gin.Context) (*tenant.Limits, bool) {
 // The connection has the tenant's search_path already set and is safe to use
 // for tenant-scoped queries. Do NOT close this connection manually - it will
 // be closed automatically when the request completes.
-func GetTenantConnFromContext(c *gin.Context) (*sql.Conn, bool) {
+func GetTenantConnFromContext(c *gin.Context) (*tenant.Conn, bool) {
 	conn, exists := c.Get("tenant_conn")
 	if !exists {
 		return nil, false
 	}
 
-	tc, ok := conn.(*sql.Conn)
+	tc, ok := conn.(*tenant.Conn)
 	return tc, ok
 }
 

@@ -1,7 +1,6 @@
 package database
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,7 +15,7 @@ func TestNewMigrationManager(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	migrationsDir := "/path/to/migrations"
 
-	mgr := NewMigrationManager(nil, logger, migrationsDir)
+	mgr := NewMigrationManager(nil, logger, migrationsDir, nil, nil)
 	if mgr == nil {
 		t.Error("NewMigrationManager() should not return nil")
 	}
@@ -26,98 +25,6 @@ func TestNewMigrationManager(t *testing.T) {
 		if concreteMgr.migrationsDir != migrationsDir {
 			t.Errorf("NewMigrationManager() migrationsDir = %v, want %v", concreteMgr.migrationsDir, migrationsDir)
 		}
-	}
-}
-
-func TestMigrationManager_ApplyMigration(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	tenantID := uuid.New()
-	migration := &tenant.Migration{
-		ID:      uuid.New(),
-		Version: "001",
-		Name:    "test_migration",
-		SQL:     "CREATE TABLE test (id INT);",
-	}
-
-	err := mgr.ApplyMigration(context.Background(), tenantID, migration)
-	if err != nil {
-		t.Errorf("ApplyMigration() error = %v, want nil", err)
-	}
-}
-
-func TestMigrationManager_ApplyToAllTenants(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	migration := &tenant.Migration{
-		ID:      uuid.New(),
-		Version: "001",
-		Name:    "test_migration",
-		SQL:     "CREATE TABLE test (id INT);",
-	}
-
-	err := mgr.ApplyToAllTenants(context.Background(), migration)
-	if err != nil {
-		t.Errorf("ApplyToAllTenants() error = %v, want nil", err)
-	}
-}
-
-func TestMigrationManager_RollbackMigration(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	tenantID := uuid.New()
-	err := mgr.RollbackMigration(context.Background(), tenantID, "001")
-	if err != nil {
-		t.Errorf("RollbackMigration() error = %v, want nil", err)
-	}
-}
-
-func TestMigrationManager_GetAppliedMigrations(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	tenantID := uuid.New()
-	migrations, err := mgr.GetAppliedMigrations(context.Background(), tenantID)
-	if err != nil {
-		t.Errorf("GetAppliedMigrations() error = %v, want nil", err)
-	}
-
-	if migrations == nil {
-		t.Error("GetAppliedMigrations() should not return nil")
-	}
-}
-
-func TestMigrationManager_IsMigrationApplied(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	tenantID := uuid.New()
-	applied, err := mgr.IsMigrationApplied(context.Background(), tenantID, "001")
-	if err != nil {
-		t.Errorf("IsMigrationApplied() error = %v, want nil", err)
-	}
-
-	// Should return false for non-existent migration
-	if applied {
-		t.Error("IsMigrationApplied() should return false for non-existent migration")
 	}
 }
 
@@ -143,7 +50,7 @@ func TestMigrationManager_LoadMigrationFromFile(t *testing.T) {
 		t.Fatalf("Failed to create down migration file: %v", err)
 	}
 
-	mgr := NewMigrationManager(nil, logger, tempDir)
+	mgr := NewMigrationManager(nil, logger, tempDir, nil, nil)
 
 	migration, err := mgr.(*MigrationManager).LoadMigrationFromFile("001", "test_migration")
 	if err != nil {
@@ -191,7 +98,7 @@ func TestMigrationManager_LoadMigrationFromFile_NoDownFile(t *testing.T) {
 		t.Fatalf("Failed to create up migration file: %v", err)
 	}
 
-	mgr := NewMigrationManager(nil, logger, tempDir)
+	mgr := NewMigrationManager(nil, logger, tempDir, nil, nil)
 
 	migration, err := mgr.(*MigrationManager).LoadMigrationFromFile("002", "test_migration")
 	if err != nil {
@@ -210,38 +117,11 @@ func TestMigrationManager_LoadMigrationFromFile_FileNotFound(t *testing.T) {
 	// Use empty temp directory
 	tempDir := t.TempDir()
 
-	mgr := NewMigrationManager(nil, logger, tempDir)
+	mgr := NewMigrationManager(nil, logger, tempDir, nil, nil)
 
 	_, err := mgr.(*MigrationManager).LoadMigrationFromFile("999", "nonexistent")
 	if err == nil {
 		t.Error("LoadMigrationFromFile() should error for non-existent file")
-	}
-}
-
-func TestMigrationManager_ApplyMigrationFromFile(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	tenantID := uuid.New()
-	err := mgr.(*MigrationManager).ApplyMigrationFromFile(context.Background(), tenantID, "001", "test_migration")
-	if err != nil {
-		t.Errorf("ApplyMigrationFromFile() error = %v, want nil", err)
-	}
-}
-
-func TestMigrationManager_ApplyMigrationToAllTenantsFromFile(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
-
-	err := mgr.(*MigrationManager).ApplyMigrationToAllTenantsFromFile(context.Background(), "001", "test_migration")
-	if err != nil {
-		t.Errorf("ApplyMigrationToAllTenantsFromFile() error = %v, want nil", err)
 	}
 }
 
@@ -269,7 +149,7 @@ func TestMigrationManager_ListMigrationFiles(t *testing.T) {
 		}
 	}
 
-	mgr := NewMigrationManager(nil, logger, tempDir)
+	mgr := NewMigrationManager(nil, logger, tempDir, nil, nil)
 
 	migrations, err := mgr.(*MigrationManager).ListMigrationFiles()
 	if err != nil {
@@ -307,7 +187,7 @@ func TestMigrationManager_ListMigrationFiles_EmptyDir(t *testing.T) {
 	// Use empty temp directory
 	tempDir := t.TempDir()
 
-	mgr := NewMigrationManager(nil, logger, tempDir)
+	mgr := NewMigrationManager(nil, logger, tempDir, nil, nil)
 
 	migrations, err := mgr.(*MigrationManager).ListMigrationFiles()
 	if err != nil {
@@ -323,7 +203,7 @@ func TestMigrationManager_ListMigrationFiles_EmptyDir(t *testing.T) {
 func TestMigrationManager_ListMigrationFiles_NoDir(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
-	mgr := NewMigrationManager(nil, logger, "")
+	mgr := NewMigrationManager(nil, logger, "", nil, nil)
 
 	_, err := mgr.(*MigrationManager).ListMigrationFiles()
 	if err == nil {
@@ -334,7 +214,7 @@ func TestMigrationManager_ListMigrationFiles_NoDir(t *testing.T) {
 func TestMigrationManager_ListMigrationFiles_NonexistentDir(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
-	mgr := NewMigrationManager(nil, logger, "/nonexistent/directory")
+	mgr := NewMigrationManager(nil, logger, "/nonexistent/directory", nil, nil)
 
 	_, err := mgr.(*MigrationManager).ListMigrationFiles()
 	if err == nil {
@@ -342,27 +222,11 @@ func TestMigrationManager_ListMigrationFiles_NonexistentDir(t *testing.T) {
 	}
 }
 
-func TestMigrationManager_validateTenantSchema(t *testing.T) {
-	// Skip this test as it requires actual database connection
-	t.Skip("Skipping database test - requires PostgreSQL database")
-
-	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "").(*MigrationManager)
-
-	tenantID := uuid.New()
-	exists := mgr.validateTenantSchema(context.Background(), tenantID)
-
-	// Should return false for non-existent schema
-	if exists {
-		t.Error("validateTenantSchema() should return false for non-existent schema")
-	}
-}
-
 // Mock tests that don't require database
 
 func TestMigrationManager_Migration_Fields(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "/test/path")
+	mgr := NewMigrationManager(nil, logger, "/test/path", nil, nil)
 
 	// Verify the manager was created with correct fields
 	if concreteMgr, ok := mgr.(*MigrationManager); ok {
@@ -420,7 +284,7 @@ func TestMigrationManager_Migration_WithoutRollback(t *testing.T) {
 
 func TestMigrationManager_Interface(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	mgr := NewMigrationManager(nil, logger, "")
+	mgr := NewMigrationManager(nil, logger, "", nil, nil)
 
 	// Test that it implements the MigrationManager interface
 	var _ tenant.MigrationManager = mgr

@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -230,6 +231,7 @@ type LimitDefinition struct {
 
 // LimitSchema defines available limit types for a system
 type LimitSchema struct {
+	mu          sync.RWMutex
 	Definitions map[string]*LimitDefinition `json:"definitions"`
 }
 
@@ -242,22 +244,36 @@ func NewLimitSchema() *LimitSchema {
 
 // AddDefinition adds a limit definition to the schema
 func (ls *LimitSchema) AddDefinition(def *LimitDefinition) {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
 	ls.Definitions[def.Name] = def
 }
 
 // GetDefinition gets a limit definition by name
 func (ls *LimitSchema) GetDefinition(name string) (*LimitDefinition, bool) {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 	def, exists := ls.Definitions[name]
 	return def, exists
 }
 
 // GetAllDefinitions returns all limit definitions
+// GetAllDefinitions returns a snapshot of all limit definitions.
 func (ls *LimitSchema) GetAllDefinitions() map[string]*LimitDefinition {
-	return ls.Definitions
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+	out := make(map[string]*LimitDefinition, len(ls.Definitions))
+	for k, v := range ls.Definitions {
+		out[k] = v
+	}
+	return out
 }
 
 // ValidateLimits validates a set of limits against the schema
 func (ls *LimitSchema) ValidateLimits(limits FlexibleLimits) error {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
+
 	// Check required limits
 	for name, def := range ls.Definitions {
 		if def.Required {
@@ -287,13 +303,15 @@ func (ls *LimitSchema) ValidateLimits(limits FlexibleLimits) error {
 
 // CreateDefaultLimits creates a FlexibleLimits with default values from schema
 func (ls *LimitSchema) CreateDefaultLimits() FlexibleLimits {
+	ls.mu.RLock()
+	defer ls.mu.RUnlock()
 	limits := make(FlexibleLimits)
 
 	for name, def := range ls.Definitions {
 		if def.DefaultValue != nil {
 			limits[name] = &LimitValue{
 				Type:  def.Type,
-				Value: def.DefaultValue,
+				Value: def.DefaultValue.Value,
 			}
 		}
 	}

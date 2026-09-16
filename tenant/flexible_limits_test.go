@@ -607,3 +607,22 @@ func TestDefaultLimitSchema(t *testing.T) {
 		t.Error("DefaultLimitSchema() should have max_projects definition")
 	}
 }
+
+func TestLimitSchema_CreateDefaultLimitsUnwrapsDefaultValue(t *testing.T) {
+	schema := NewLimitSchema()
+	schema.AddDefinition(&LimitDefinition{
+		Name:         "max_widgets",
+		Type:         LimitTypeInt,
+		DefaultValue: &LimitValue{Type: LimitTypeInt, Value: 5},
+	})
+
+	limits := schema.CreateDefaultLimits()
+
+	got, err := limits.GetInt("max_widgets")
+	if err != nil {
+		t.Fatalf("GetInt failed: %v", err)
+	}
+	if got != 5 {
+		t.Errorf("default max_widgets = %d, want 5", got)
+	}
+}
