@@ -249,16 +249,23 @@ admin.Use(mt.GinMiddleware.RequireAdmin())
 
 ```go
 // With SetTenantDB in the chain, each request gets a dedicated connection
-// whose search_path is the tenant schema. It is released when the request ends.
+// scoped to the tenant schema. It is released when the request ends.
 func getProjects(c *gin.Context) {
     conn, _ := ginmiddleware.GetTenantConnFromContext(c)
 
     // This query only sees the current tenant's projects
     rows, err := conn.QueryContext(c.Request.Context(),
         "SELECT * FROM projects WHERE status = $1", "active")
+    if err != nil { /* ... */ }
+    defer rows.Close() // also ends the statement's scoping transaction
     // ...
 }
 ```
+
+Each `ExecContext`, `QueryContext` and `QueryRowContext` on a `tenant.Conn`
+runs in its own transaction that starts with `SET LOCAL search_path`, so the
+connection never carries tenant state between statements. Use `conn.BeginTx`
+or `Manager.WithTenantTx` to run several statements in one transaction.
 
 ### Manual Tenant Context
 
@@ -270,11 +277,27 @@ err := mt.Manager.WithTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
     return err
 })
 
-// Or hold a dedicated connection; Close() resets search_path before
-// returning it to the pool.
+// Or hold a dedicated connection. Nothing is set on the session, so Close()
+// simply returns it to the pool.
 conn, err := mt.Manager.GetTenantConn(ctx, tenantID)
 defer conn.Close()
 ```
+
+### Connection poolers
+
+The library never relies on session state: tenant scoping is always
+`SET LOCAL` inside a transaction, migrations run in transactions, and the
+pgx driver uses the simple protocol (no server-side prepared statements).
+CI runs the full integration suite through PgBouncer in transaction mode.
+
+| Deployment | `WithTenantTx` / `Conn.BeginTx` | `tenant.Conn` per-statement | Migrations |
+|---|---|---|---|
+| Direct connections | yes | yes | yes |
+| PgBouncer / pgcat, session mode | yes | yes | yes |
+| PgBouncer / pgcat, transaction mode | yes | yes | yes |
+| Statement mode | no | no | no |
+
+Statement mode breaks multi-statement transactions themselves and is not supported.
 
 ## 📋 Tenant Management
 

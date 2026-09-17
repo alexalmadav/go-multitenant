@@ -37,7 +37,19 @@ database can be found.
 Tenants are provisioned from `testdata/migrations` (projects, tenant_users)
 via `testConfig`.
 
-- **`database_integration_test.go`** - Schema isolation, search_path safety, connection reset, migrations, limit enforcement, schema listing
+- **`database_integration_test.go`** - Schema isolation, search_path safety, pooler-safe tenant connections, migrations, limit enforcement, schema listing
+
+CI runs the root integration suite twice: once against PostgreSQL directly
+and once through PgBouncer in transaction mode (`TEST_DATABASE_URL` pointed at
+the pooler). Locally you can do the same with a PgBouncer container:
+
+```bash
+docker run -d --name pgbouncer --add-host=host.docker.internal:host-gateway -p 6432:5432 \
+  -e DB_HOST=host.docker.internal -e DB_USER=postgres -e DB_PASSWORD=postgres \
+  -e DB_NAME=test_multitenant -e POOL_MODE=transaction -e AUTH_TYPE=scram-sha-256 \
+  edoburu/pgbouncer
+TEST_DATABASE_URL='postgres://postgres:postgres@localhost:6432/test_multitenant?sslmode=disable' go test -count=1 .
+```
 - **`integration_test.go`** - Tenant lifecycle, resolver with real data, concurrent creation
 
 ## Running Tests

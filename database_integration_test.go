@@ -2661,3 +2661,142 @@ func TestDatabase_Hooks_ProvisionedHookCanPersistMetadata(t *testing.T) {
 		t.Errorf("status = %s", got.Status)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Pooler-safe tenant connections: no session state, every statement scoped
+// ---------------------------------------------------------------------------
+
+// TestDatabase_TenantConn_LeavesSessionSearchPathUntouched pins the invariant
+// that makes tenant.Conn safe behind transaction-mode poolers: it never sets
+// session-level search_path on the underlying connection.
+func TestDatabase_TenantConn_LeavesSessionSearchPathUntouched(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	conn, err := mt.Manager.GetTenantConn(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("GetTenantConn: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "INSERT INTO projects (name) VALUES ('scoped')"); err != nil {
+		t.Fatalf("ExecContext: %v", err)
+	}
+	var n int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
+		t.Fatalf("QueryRowContext: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("count = %d, want 1", n)
+	}
+
+	// Bypass the wrapper: the session itself must not carry the tenant schema.
+	var searchPath string
+	if err := conn.Unwrap().QueryRowContext(ctx, "SHOW search_path").Scan(&searchPath); err != nil {
+		t.Fatalf("SHOW search_path on underlying conn: %v", err)
+	}
+	schema := fmt.Sprintf("tenant_%s", strings.ReplaceAll(ids[0].String(), "-", "_"))
+	if strings.Contains(searchPath, schema) {
+		t.Errorf("session search_path carries tenant schema (%s); tenant.Conn must use SET LOCAL per statement", searchPath)
+	}
+}
+
+func TestDatabase_TenantConn_EveryOperationIsScopedToItsTenant(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 2)
+	ctx := context.Background()
+	seedProjects(t, mt, ids[0], 2)
+	seedProjects(t, mt, ids[1], 5)
+
+	for i, want := range []int{2, 5} {
+		conn, err := mt.Manager.GetTenantConn(ctx, ids[i])
+		if err != nil {
+			t.Fatalf("GetTenantConn: %v", err)
+		}
+
+		// ExecContext
+		if _, err := conn.ExecContext(ctx, "INSERT INTO projects (name) VALUES ($1)", "extra"); err != nil {
+			t.Fatalf("ExecContext: %v", err)
+		}
+		want++
+
+		// QueryContext with a Rows that must be closed
+		rows, err := conn.QueryContext(ctx, "SELECT name FROM projects ORDER BY name")
+		if err != nil {
+			t.Fatalf("QueryContext: %v", err)
+		}
+		got := 0
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			got++
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("rows.Close: %v", err)
+		}
+		if got != want {
+			t.Errorf("tenant %d: QueryContext saw %d rows, want %d", i, got, want)
+		}
+
+		// QueryRowContext
+		var n int
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
+			t.Fatalf("QueryRowContext: %v", err)
+		}
+		if n != want {
+			t.Errorf("tenant %d: QueryRowContext = %d, want %d", i, n, want)
+		}
+
+		// BeginTx: a transaction that is already scoped
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("BeginTx: %v", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO projects (name) VALUES ('in-tx')"); err != nil {
+			t.Fatalf("tx exec: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		want++
+		if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects").Scan(&n); err != nil || n != want {
+			t.Errorf("tenant %d: after BeginTx count = %d (%v), want %d", i, n, err, want)
+		}
+
+		if err := conn.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+
+	// Nothing leaked into public.
+	if exists, _ := tdb.tableExistsInSchema("public", "projects"); exists {
+		t.Errorf("projects table must not exist in public")
+	}
+}
+
+func TestDatabase_TenantConn_FailedStatementRollsBackAndConnStaysUsable(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	ctx := context.Background()
+
+	conn, err := mt.Manager.GetTenantConn(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("GetTenantConn: %v", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "INSERT INTO nope (x) VALUES (1)"); err == nil {
+		t.Fatalf("expected error for missing table")
+	}
+	// The connection must not be stuck in an aborted transaction.
+	var n int
+	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
+		t.Fatalf("connection unusable after failed statement: %v", err)
+	}
+}

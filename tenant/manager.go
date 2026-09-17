@@ -366,8 +366,9 @@ func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, err
 	return stats, nil
 }
 
-// GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
-// The caller MUST close the connection when done to return it to the pool.
+// GetTenantConn returns a dedicated connection scoped to the tenant's schema.
+// Every statement on it runs in its own SET LOCAL transaction, so it is safe
+// behind transaction-mode poolers. The caller MUST close it when done.
 func (m *manager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*Conn, error) {
 	// Get a dedicated connection from the pool
 	conn, err := m.db.Conn(ctx)
@@ -375,20 +376,15 @@ func (m *manager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*Conn,
 		return nil, fmt.Errorf("failed to acquire connection: %w", err)
 	}
 
-	// Set search_path on this specific connection using PostgreSQL identifier quoting
+	// No session state is set here: Conn scopes every statement with
+	// SET LOCAL inside its own transaction, which is pooler-safe.
 	schemaName := m.schemaManager.GetSchemaName(tenantID)
-	quotedSchema := fmt.Sprintf(`"%s"`, schemaName)
-	query := fmt.Sprintf("SET search_path TO %s, public", quotedSchema)
-	if _, err := conn.ExecContext(ctx, query); err != nil {
-		conn.Close() // Release connection on error
-		return nil, fmt.Errorf("failed to set search path: %w", err)
-	}
 
 	m.logger.Debug("Acquired tenant connection",
 		zap.String("tenant_id", tenantID.String()),
 		zap.String("schema", schemaName))
 
-	return &Conn{Conn: conn}, nil
+	return newConn(conn, schemaName), nil
 }
 
 // WithTenantTx executes a function within a transaction with the tenant's search_path set.

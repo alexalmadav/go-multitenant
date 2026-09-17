@@ -50,3 +50,51 @@ jobs:
           go-version-file: go.mod
       - name: All tests against PostgreSQL
         run: go test -count=1 ./...
+
+  pgbouncer:
+    name: Integration tests (PgBouncer, transaction mode)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_multitenant
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      pgbouncer:
+        image: edoburu/pgbouncer:latest
+        env:
+          DB_HOST: postgres
+          DB_PORT: 5432
+          DB_USER: postgres
+          DB_PASSWORD: postgres
+          DB_NAME: test_multitenant
+          POOL_MODE: transaction
+          AUTH_TYPE: scram-sha-256
+          MAX_CLIENT_CONN: 200
+          DEFAULT_POOL_SIZE: 20
+        ports:
+          - 6432:5432
+    env:
+      # Every statement the library issues must be correct when consecutive
+      # statements can land on different server connections.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:6432/test_multitenant?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Wait for PgBouncer
+        run: |
+          for i in $(seq 1 30); do
+            (echo > /dev/tcp/127.0.0.1/6432) >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          echo "pgbouncer did not open port 6432" && exit 1
+      - name: Root integration suite through PgBouncer
+        run: go test -count=1 -timeout 240s .
