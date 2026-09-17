@@ -575,8 +575,8 @@ func (m *MockLimitCheckerRepository) List(ctx context.Context, page, perPage int
 	return tenants, len(tenants), nil
 }
 
-func (m *MockLimitCheckerRepository) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
-	return &Stats{TenantID: tenantID}, nil
+func (m *MockLimitCheckerRepository) FindByMetadata(ctx context.Context, key, value string) ([]*Tenant, error) {
+	return nil, nil
 }
 
 type MockUsageTracker struct{}

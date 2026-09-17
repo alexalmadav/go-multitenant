@@ -211,31 +211,25 @@ func TestLimits_Fields(t *testing.T) {
 
 func TestStats_Fields(t *testing.T) {
 	tenantID := uuid.New()
-	now := time.Now()
 
 	stats := Stats{
-		TenantID:      tenantID,
-		UserCount:     5,
-		ProjectCount:  3,
-		StorageUsedGB: 2.5,
-		LastActivity:  now,
-		SchemaExists:  true,
+		TenantID:          tenantID,
+		SchemaExists:      true,
+		AppliedMigrations: 2,
+		Usage:             map[string]int{"max_projects": 3},
 	}
 
 	if stats.TenantID != tenantID {
 		t.Errorf("Stats.TenantID = %v, want %v", stats.TenantID, tenantID)
 	}
-	if stats.UserCount != 5 {
-		t.Errorf("Stats.UserCount = %v, want %v", stats.UserCount, 5)
-	}
-	if stats.ProjectCount != 3 {
-		t.Errorf("Stats.ProjectCount = %v, want %v", stats.ProjectCount, 3)
-	}
-	if stats.StorageUsedGB != 2.5 {
-		t.Errorf("Stats.StorageUsedGB = %v, want %v", stats.StorageUsedGB, 2.5)
-	}
 	if !stats.SchemaExists {
 		t.Errorf("Stats.SchemaExists = %v, want %v", stats.SchemaExists, true)
+	}
+	if stats.AppliedMigrations != 2 {
+		t.Errorf("Stats.AppliedMigrations = %v, want %v", stats.AppliedMigrations, 2)
+	}
+	if stats.Usage["max_projects"] != 3 {
+		t.Errorf(`Stats.Usage["max_projects"] = %v, want %v`, stats.Usage["max_projects"], 3)
 	}
 }
 

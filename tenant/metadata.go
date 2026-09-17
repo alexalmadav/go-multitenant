@@ -1,36 +1,36 @@
+// Package tenant's metadata.go holds per-tenant metadata: a free-form,
+// JSONB-backed key-value bag stored on Tenant.Metadata and persisted in
+// public.tenants.metadata. Applications use it to attach arbitrary
+// integration data (Stripe customer IDs, branding preferences, feature
+// flags, ...) to a tenant without a schema migration for every new field.
 package tenant
 
 import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
-	"time"
-
-	"github.com/google/uuid"
 )
-
-// ExtensibleTenant extends the base tenant with custom metadata
-type ExtensibleTenant struct {
-	ID         uuid.UUID      `json:"id"`
-	Name       string         `json:"name"`
-	Subdomain  string         `json:"subdomain"`
-	PlanType   string         `json:"plan_type"`
-	Status     string         `json:"status"`
-	SchemaName string         `json:"schema_name"`
-	Metadata   TenantMetadata `json:"metadata"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
-}
 
 // TenantMetadata holds extensible key-value metadata for tenants
 type TenantMetadata map[string]interface{}
 
-// Value implements the driver.Valuer interface for database storage
+// Value implements the driver.Valuer interface for database storage.
+// A nil map serializes as an empty JSON object so the column is never NULL.
+//
+// This returns a string rather than the []byte json.Marshal produces:
+// the database connection here uses pgx's simple query protocol, which
+// encodes an untyped []byte parameter as a bytea literal (hex-escaped),
+// not as JSON text, so a jsonb column would reject it. A string parameter
+// is sent as a plain text literal that Postgres casts to jsonb correctly.
 func (tm TenantMetadata) Value() (driver.Value, error) {
 	if tm == nil {
-		return nil, nil
+		return "{}", nil
 	}
-	return json.Marshal(tm)
+	b, err := json.Marshal(tm)
+	if err != nil {
+		return nil, err
+	}
+	return string(b), nil
 }
 
 // Scan implements the sql.Scanner interface for database reading
@@ -50,7 +50,13 @@ func (tm *TenantMetadata) Scan(value interface{}) error {
 		return errors.New("cannot scan non-string/[]byte into TenantMetadata")
 	}
 
-	return json.Unmarshal(bytes, tm)
+	if err := json.Unmarshal(bytes, tm); err != nil {
+		return err
+	}
+	if *tm == nil {
+		*tm = make(TenantMetadata)
+	}
+	return nil
 }
 
 // GetString safely gets a string value from metadata
@@ -110,35 +116,6 @@ func (tm TenantMetadata) Has(key string) bool {
 // Remove removes a key from metadata
 func (tm TenantMetadata) Remove(key string) {
 	delete(tm, key)
-}
-
-// ToBaseTenant converts an ExtensibleTenant to the base Tenant type
-func (et *ExtensibleTenant) ToBaseTenant() *Tenant {
-	return &Tenant{
-		ID:         et.ID,
-		Name:       et.Name,
-		Subdomain:  et.Subdomain,
-		PlanType:   et.PlanType,
-		Status:     et.Status,
-		SchemaName: et.SchemaName,
-		CreatedAt:  et.CreatedAt,
-		UpdatedAt:  et.UpdatedAt,
-	}
-}
-
-// FromBaseTenant creates an ExtensibleTenant from a base Tenant
-func FromBaseTenant(t *Tenant) *ExtensibleTenant {
-	return &ExtensibleTenant{
-		ID:         t.ID,
-		Name:       t.Name,
-		Subdomain:  t.Subdomain,
-		PlanType:   t.PlanType,
-		Status:     t.Status,
-		SchemaName: t.SchemaName,
-		Metadata:   make(TenantMetadata),
-		CreatedAt:  t.CreatedAt,
-		UpdatedAt:  t.UpdatedAt,
-	}
 }
 
 // Common metadata keys (conventions)

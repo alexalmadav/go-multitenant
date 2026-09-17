@@ -177,8 +177,24 @@ The system comes with a comprehensive default schema including:
 
 ## Integration with Usage Tracking
 
+The default usage tracker (wired up by `multitenant.New`) reads
+`config.Limits.UsageTables`, a map from limit name to the table in the tenant
+schema whose row count is that limit's current usage:
+
 ```go
-// Set usage tracker for automatic limit checking
+config.Limits.UsageTables = map[string]string{
+    "max_projects": "projects",
+    "max_users":    "tenant_users",
+}
+```
+
+**Only limits listed in `UsageTables` are checked against the database.** A
+limit defined in `PlanLimits` but absent from `UsageTables` — and not served
+by a custom `UsageTracker` — is never enforced; `CheckLimit` reports no usage
+for it and it is silently unlimited in practice.
+
+```go
+// Set a custom usage tracker for automatic limit checking
 limitChecker.SetUsageTracker(usageTracker)
 
 // Usage tracker interface
@@ -188,6 +204,10 @@ type UsageTracker interface {
     DecrementUsage(ctx context.Context, tenantID uuid.UUID, limitName string, delta interface{}) error
 }
 ```
+
+A custom tracker can serve limits `UsageTables` does not cover — for example,
+computed or externally-fetched usage — by implementing `GetCurrentUsage` for
+those limit names itself.
 
 ## Error Handling
 

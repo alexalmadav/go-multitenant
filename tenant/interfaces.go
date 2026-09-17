@@ -31,12 +31,11 @@ type Manager interface {
 	LimitChecker() LimitChecker
 	GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error)
 
+	// RegisterHook adds a lifecycle hook. Hooks run in registration order.
+	RegisterHook(h Hook)
+
 	// Database operations
 	//
-	// Deprecated: GetTenantDB is unsafe with connection pools. Use GetTenantConn or WithTenantTx instead.
-	// The search_path set on one connection may not apply to subsequent queries from the pool.
-	GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error)
-
 	// GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
 	// IMPORTANT: The caller MUST close the connection when done to return it to the pool.
 	// Example:
@@ -73,11 +72,10 @@ type Resolver interface {
 
 // SchemaManager handles database schema operations
 type SchemaManager interface {
-	CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error
+	CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error
 	DropTenantSchema(ctx context.Context, tenantID uuid.UUID) error
 	SchemaExists(ctx context.Context, tenantID uuid.UUID) (bool, error)
 	GetSchemaName(tenantID uuid.UUID) string
-	SetSearchPath(db *sql.DB, tenantID uuid.UUID) error
 	ListTenantSchemas(ctx context.Context) ([]string, error)
 }
 
@@ -86,6 +84,11 @@ type MigrationManager interface {
 	ApplyMigration(ctx context.Context, tenantID uuid.UUID, migration *Migration) error
 	RollbackMigration(ctx context.Context, tenantID uuid.UUID, version string) error
 	ApplyToAllTenants(ctx context.Context, migration *Migration) error
+	// ApplyPending applies every migration file in MigrationsDir that has not
+	// been recorded for the tenant, in filename order.
+	ApplyPending(ctx context.Context, tenantID uuid.UUID) error
+	// ApplyPendingToAllTenants runs ApplyPending for every active tenant.
+	ApplyPendingToAllTenants(ctx context.Context) error
 	GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*Migration, error)
 	IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error)
 }
@@ -109,7 +112,8 @@ type Repository interface {
 	Update(ctx context.Context, tenant *Tenant) error
 	Delete(ctx context.Context, id uuid.UUID) error
 	List(ctx context.Context, page, perPage int) ([]*Tenant, int, error)
-	GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error)
+	// FindByMetadata returns tenants whose metadata[key] equals value (as text).
+	FindByMetadata(ctx context.Context, key, value string) ([]*Tenant, error)
 }
 
 // Middleware represents HTTP middleware for tenant handling
@@ -132,8 +136,6 @@ const (
 	ContextKeyTenant ContextKey = "tenant"
 	// ContextKeyTenantID is the context key for tenant ID
 	ContextKeyTenantID ContextKey = "tenant_id"
-	// ContextKeyTenantDB is the context key for tenant database connection (deprecated)
-	ContextKeyTenantDB ContextKey = "tenant_db"
 	// ContextKeyTenantConn is the context key for dedicated tenant database connection
 	ContextKeyTenantConn ContextKey = "tenant_conn"
 )
@@ -148,14 +150,6 @@ func GetTenantFromContext(ctx context.Context) (*Context, bool) {
 func GetTenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 	tenantID, ok := ctx.Value(ContextKeyTenantID).(uuid.UUID)
 	return tenantID, ok
-}
-
-// GetTenantDBFromContext extracts tenant database connection from a context.
-//
-// Deprecated: Use GetTenantConnFromContext instead for safe tenant-scoped queries.
-func GetTenantDBFromContext(ctx context.Context) (*sql.DB, bool) {
-	db, ok := ctx.Value(ContextKeyTenantDB).(*sql.DB)
-	return db, ok
 }
 
 // GetTenantConnFromContext extracts the dedicated tenant database connection from context.

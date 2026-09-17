@@ -29,8 +29,8 @@ func NewRepository(db *sql.DB, logger *zap.Logger) *Repository {
 // Create creates a new tenant
 func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 	query := `
-		INSERT INTO public.tenants (id, name, subdomain, plan_type, status, schema_name, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO public.tenants (id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
 
 	now := time.Now()
@@ -44,6 +44,7 @@ func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 		t.PlanType,
 		t.Status,
 		t.SchemaName,
+		t.Metadata,
 		t.CreatedAt,
 		t.UpdatedAt,
 	)
@@ -66,7 +67,7 @@ func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 // GetByID retrieves a tenant by ID
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
 	query := `
-		SELECT id, name, subdomain, plan_type, status, schema_name, created_at, updated_at
+		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE id = $1
 	`
@@ -79,6 +80,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant,
 		&t.PlanType,
 		&t.Status,
 		&t.SchemaName,
+		&t.Metadata,
 		&t.CreatedAt,
 		&t.UpdatedAt,
 	)
@@ -99,7 +101,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant,
 // GetBySubdomain retrieves a tenant by subdomain
 func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*tenant.Tenant, error) {
 	query := `
-		SELECT id, name, subdomain, plan_type, status, schema_name, created_at, updated_at
+		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE subdomain = $1
 	`
@@ -112,6 +114,7 @@ func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*ten
 		&t.PlanType,
 		&t.Status,
 		&t.SchemaName,
+		&t.Metadata,
 		&t.CreatedAt,
 		&t.UpdatedAt,
 	)
@@ -132,8 +135,8 @@ func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*ten
 // Update updates a tenant
 func (r *Repository) Update(ctx context.Context, t *tenant.Tenant) error {
 	query := `
-		UPDATE public.tenants 
-		SET name = $2, subdomain = $3, plan_type = $4, status = $5, updated_at = $6
+		UPDATE public.tenants
+		SET name = $2, subdomain = $3, plan_type = $4, status = $5, metadata = $6, updated_at = $7
 		WHERE id = $1
 	`
 
@@ -145,6 +148,7 @@ func (r *Repository) Update(ctx context.Context, t *tenant.Tenant) error {
 		t.Subdomain,
 		t.PlanType,
 		t.Status,
+		t.Metadata,
 		t.UpdatedAt,
 	)
 
@@ -223,7 +227,7 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 
 	// Get tenants
 	query := `
-		SELECT id, name, subdomain, plan_type, status, schema_name, created_at, updated_at
+		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE status != $1
 		ORDER BY created_at DESC
@@ -237,65 +241,40 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 	}
 	defer rows.Close()
 
-	var tenants []*tenant.Tenant
-	for rows.Next() {
-		t := &tenant.Tenant{}
-		err := rows.Scan(
-			&t.ID,
-			&t.Name,
-			&t.Subdomain,
-			&t.PlanType,
-			&t.Status,
-			&t.SchemaName,
-			&t.CreatedAt,
-			&t.UpdatedAt,
-		)
-		if err != nil {
-			r.logger.Error("Failed to scan tenant", zap.Error(err))
-			continue
-		}
-		tenants = append(tenants, t)
+	tenants, err := scanTenants(rows)
+	if err != nil {
+		r.logger.Error("Failed to scan tenants", zap.Error(err))
+		return nil, 0, fmt.Errorf("failed to list tenants: %w", err)
 	}
 
 	return tenants, total, nil
 }
 
-// GetStats retrieves usage statistics for a tenant
-func (r *Repository) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.Stats, error) {
-	// First get the tenant to get schema name
-	t, err := r.GetByID(ctx, tenantID)
+// FindByMetadata returns tenants whose metadata[key] equals value.
+func (r *Repository) FindByMetadata(ctx context.Context, key, value string) ([]*tenant.Tenant, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
+		FROM public.tenants
+		WHERE metadata ->> $1 = $2
+		ORDER BY created_at`, key, value)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query tenants by metadata: %w", err)
 	}
+	defer rows.Close()
+	return scanTenants(rows)
+}
 
-	// Initialize stats
-	stats := &tenant.Stats{
-		TenantID:     tenantID,
-		LastActivity: time.Now(),
-		SchemaExists: true, // Assume exists for now - could be checked
+// scanTenants reads every row of a tenants SELECT with the standard column order.
+func scanTenants(rows *sql.Rows) ([]*tenant.Tenant, error) {
+	var tenants []*tenant.Tenant
+	for rows.Next() {
+		t := &tenant.Tenant{}
+		if err := rows.Scan(&t.ID, &t.Name, &t.Subdomain, &t.PlanType, &t.Status, &t.SchemaName, &t.Metadata, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan tenant: %w", err)
+		}
+		tenants = append(tenants, t)
 	}
-
-	// Get project count from tenant schema
-	projectCountQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.projects`, t.SchemaName)
-	err = r.db.QueryRowContext(ctx, projectCountQuery).Scan(&stats.ProjectCount)
-	if err != nil {
-		// Schema might not exist or no projects table
-		stats.ProjectCount = 0
-		stats.SchemaExists = false
-	}
-
-	// Get user count from tenant schema
-	userCountQuery := fmt.Sprintf(`SELECT COUNT(*) FROM %s.tenant_users WHERE is_active = true`, t.SchemaName)
-	err = r.db.QueryRowContext(ctx, userCountQuery).Scan(&stats.UserCount)
-	if err != nil {
-		// Schema might not exist or no users table
-		stats.UserCount = 0
-	}
-
-	// Storage calculation would be more complex in practice
-	stats.StorageUsedGB = 0.0
-
-	return stats, nil
+	return tenants, rows.Err()
 }
 
 // CreateMasterTables creates the master tables needed for tenant management
@@ -308,6 +287,7 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 			plan_type VARCHAR(50) NOT NULL DEFAULT 'basic',
 			status VARCHAR(50) NOT NULL DEFAULT 'pending',
 			schema_name VARCHAR(255) NOT NULL,
+			metadata JSONB NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			CONSTRAINT chk_plan_type CHECK (plan_type IN ('basic', 'pro', 'enterprise')),
@@ -325,6 +305,8 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 			FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE,
 			UNIQUE(tenant_id, version)
 		)`,
+
+		`ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'`,
 	}
 
 	indexes := []string{
@@ -332,6 +314,7 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 		"CREATE INDEX IF NOT EXISTS idx_tenants_status ON public.tenants(status)",
 		"CREATE INDEX IF NOT EXISTS idx_tenant_migrations_tenant_id ON public.tenant_migrations(tenant_id)",
 		"CREATE INDEX IF NOT EXISTS idx_tenant_migrations_version ON public.tenant_migrations(version)",
+		"CREATE INDEX IF NOT EXISTS idx_tenants_metadata ON public.tenants USING GIN (metadata)",
 	}
 
 	// Create tables

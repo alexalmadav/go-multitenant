@@ -38,14 +38,9 @@ Database
 │   ├── tenant_migrations
 │   └── master tables...
 ├── tenant_acme-corp-uuid
-│   ├── projects
-│   ├── tasks
-│   ├── documents
-│   └── tenant tables...
+│   └── (tables from your migrations)
 └── tenant_globex-uuid
-    ├── projects
-    ├── tasks
-    └── tenant tables...
+    └── (tables from your migrations)
 ```
 
 ## 🚀 Quick Start
@@ -118,8 +113,12 @@ config.Limits.PlanLimits = map[string]tenant.FlexibleLimits{
     multitenant.PlanPro:   pro,
 }
 
-// Limits are checked against live counts in the tenant schema (projects,
-// active tenant_users). Swap in your own tracker or add limits at runtime:
+// Limits are checked against live counts in the tenant schema. Map each
+// limit name to the tenant-schema table whose row count is its usage:
+config.Limits.UsageTables = map[string]string{"max_projects": "projects", "max_users": "tenant_users"}
+
+// Only limits listed here (or served by a custom UsageTracker) are checked.
+// Swap in your own tracker or add limits at runtime:
 mt.Manager.LimitChecker().SetUsageTracker(myTracker)
 mt.Manager.LimitChecker().AddLimit(multitenant.PlanPro, "beta_features", tenant.LimitTypeBool, true)
 
@@ -179,7 +178,7 @@ config.Resolver.HeaderName = "X-Tenant-ID"
 
 ```go
 config.Database = multitenant.DatabaseConfig{
-    Driver:              "postgres",
+    Driver:              "pgx",
     DSN:                "postgres://user:pass@localhost/db?sslmode=disable",
     MaxOpenConns:        100,
     MaxIdleConns:        50,
@@ -308,6 +307,7 @@ err := mt.Manager.ActivateTenant(ctx, tenantID)
 
 // Get tenant statistics
 stats, err := mt.Manager.GetStats(ctx, tenantID)
+// Returns: SchemaExists, AppliedMigrations, Usage (per limit in UsageTables)
 ```
 
 ### Plan Management
@@ -320,6 +320,43 @@ err := mt.Manager.UpdateTenant(ctx, tenant)
 // Check current limits
 limits, err := mt.Manager.CheckLimits(ctx, tenantID)
 ```
+
+`UpdateTenant` writes the struct you pass it wholesale — every field, not a
+diff. Always pass a freshly-read tenant (`GetTenant`, or the one you already
+have from an earlier call in the same request) and mutate that; if you pass a
+copy with a stale `Status`, `UpdateTenant` reverts the persisted status to
+that stale value and fires `OnTenantStatusChanged` for the reversion.
+
+### Metadata
+
+Every tenant has a `Metadata` map stored as JSONB and loaded with the tenant:
+
+```go
+t, _ := mt.Manager.GetTenant(ctx, id)
+t.Metadata.SetString("custom_domain", "app.acme.com")
+tenant.NewStripeExtension(t.Metadata).SetCustomerID("cus_123")
+err := mt.Manager.UpdateTenant(ctx, t)
+```
+
+### Lifecycle hooks
+
+Register a `tenant.Hook` to react to tenant events. Embed `tenant.BaseHook` and
+override what you need. `ValidateMetadata` runs before a write and can block it;
+the other events run after the write commits and their errors come back as a
+`*tenant.HookError` while the tenant persists.
+
+```go
+type auditHook struct{ tenant.BaseHook }
+func (auditHook) Name() string { return "audit" }
+func (auditHook) OnTenantStatusChanged(ctx context.Context, t *tenant.Tenant, prev string) error {
+    log.Printf("tenant %s: %s -> %s", t.ID, prev, t.Status)
+    return nil
+}
+
+mt.Manager.RegisterHook(auditHook{})
+```
+
+See `examples/stripe-integration` for a hook that keeps an external system in sync.
 
 ## 🔒 Security Features
 
@@ -370,7 +407,7 @@ api.Use(mt.GinMiddleware.RequireAdmin())
 
 ```go
 stats, err := mt.Manager.GetStats(ctx, tenantID)
-// Returns: UserCount, ProjectCount, StorageUsedGB, LastActivity
+// Returns: SchemaExists, AppliedMigrations, Usage (per limit in UsageTables)
 ```
 
 ## 🧪 Testing
@@ -394,6 +431,8 @@ Check out the [examples](./examples/) directory:
 
 - **[Basic Example](./examples/basic/)**: Simple multi-tenant setup
 - **[Billing Example](./examples/with-billing/)**: Advanced setup with plan limits and billing
+- **[Flexible Limits](./examples/flexible-limits/)**: Custom limit definitions and runtime limit management
+- **[Stripe Integration](./examples/stripe-integration/)**: lifecycle hook keeping a Stripe customer in sync
 
 ### Running Examples
 
@@ -405,6 +444,10 @@ go run main.go
 # Advanced billing example  
 cd examples/with-billing
 go run main.go
+
+# Stripe integration example
+cd examples/stripe-integration
+go run .
 ```
 
 ## 🗃️ Database Schema
@@ -420,6 +463,7 @@ CREATE TABLE tenants (
     plan_type VARCHAR(50) NOT NULL DEFAULT 'basic',
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
     schema_name VARCHAR(255) NOT NULL,
+    metadata JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -438,31 +482,83 @@ CREATE TABLE tenant_migrations (
 );
 ```
 
-### Tenant Schema Tables
+### Tenant schema
 
-Each tenant schema contains:
+The library creates no tables in a tenant schema. Point `config.Database.MigrationsDir`
+at a directory of `<version>_<name>.up.sql` files (optional matching `.down.sql`).
+`ProvisionTenant` creates the schema and applies every file in filename order,
+recording each in `public.tenant_migrations`. Add a file later and run
+`mt.Migrations.ApplyPendingToAllTenants(ctx)` to bring every active tenant up to
+date; new tenants get it automatically.
+
+If `MigrationsDir` is unset, provisioned tenants have an empty schema and `New`
+logs a warning. A path that does not exist is an error from `New`.
+
+`examples/with-billing` and `examples/stripe-integration` both set
+`config.Database.MigrationsDir = "./migrations"`, but that directory is not
+shipped with the repository — it is up to you to create it with your own
+migration files before running either example. A minimal one, defining the
+`projects` table those examples count usage against:
 
 ```sql
--- Projects table (example)
+-- migrations/001_create_projects.up.sql
 CREATE TABLE projects (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name VARCHAR(255) NOT NULL,
-    description TEXT,
     status VARCHAR(50) NOT NULL DEFAULT 'active',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Tasks table (example)
-CREATE TABLE tasks (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id UUID NOT NULL,
-    title VARCHAR(255) NOT NULL,
-    status VARCHAR(50) NOT NULL DEFAULT 'pending',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (project_id) REFERENCES projects(id)
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+## ⬆️ Upgrading from v0.6
+
+v0.6.0 provisioned every tenant schema with hardcoded tables
+(`projects`, `tasks`, `documents`, `tenant_users`) and had no migration
+tracking. v0.7.0 removes that: schemas come entirely from your own migration
+files (see [Tenant schema](#tenant-schema) above). This changes behaviour for
+tenants that already exist.
+
+- **New tenants** provisioned after upgrading get no tables at all unless you
+  set `config.Database.MigrationsDir`. If you relied on the old built-in
+  tables, write migration files that create them.
+- **Existing (already-provisioned) tenants** keep the tables v0.6 created —
+  upgrading does not touch tenant schemas. What they don't have is any row in
+  `public.tenant_migrations`, so `ProvisionTenant` (re-run on a tenant whose
+  provisioning previously failed) and `ApplyPendingToAllTenants` will try to
+  create `projects`/`tasks`/`documents`/`tenant_users` again and fail against
+  the tables that already exist. Bring existing tenants under migration
+  control one of two ways:
+  - Write your first migration files (e.g. `001_create_projects.up.sql`) using
+    `CREATE TABLE IF NOT EXISTS` for every table v0.6 created, so applying them
+    against an already-populated schema is a no-op; or
+  - Backfill baseline rows into `public.tenant_migrations` so the library
+    considers those tables already migrated and never tries to recreate them:
+    ```sql
+    INSERT INTO public.tenant_migrations (id, tenant_id, version, name, checksum, applied_at)
+    SELECT gen_random_uuid(), id, '001', 'baseline', NULL, now() FROM public.tenants;
+    ```
+    Adjust the `version`/`name` to match whatever you name your first real
+    migration file, so that file is treated as already applied too.
+- **Limits enforcement**: `LimitsConfig.UsageTables` defaults to empty, so
+  `EnforceLimits: true` silently stops enforcing `max_projects`/`max_users`
+  (and any other limit) unless you list the table backing it. To keep v0.6
+  behaviour:
+  ```go
+  config.Limits.UsageTables = map[string]string{
+      "max_projects": "projects",
+      "max_users":    "tenant_users",
+  }
+  ```
+- **Removed APIs**: `Manager.GetTenantDB`, `GetTenantDBFromContext`,
+  `ContextKeyTenantDB`, `SchemaManager.SetSearchPath`, `ExtensibleTenant` and
+  `ExtensibleRepository` are gone. Replacements:
+  - For per-tenant SQL, use `mt.Migrations` (`ApplyPending`,
+    `ApplyMigrationFromFile`, `RollbackMigration`, ...) for schema changes, or
+    open your own transaction against `mt.GetDatabase()` and set
+    `SET LOCAL search_path TO "<tenant schema>"` yourself the way
+    `MigrationManager` does internally.
+  - For arbitrary per-tenant data that isn't a schema, use `Tenant.Metadata`
+    (see [Metadata](#metadata) above) instead of a second tenant type.
 
 ## 🤝 Contributing
 

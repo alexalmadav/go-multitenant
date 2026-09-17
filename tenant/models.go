@@ -8,14 +8,15 @@ import (
 
 // Tenant represents a tenant in the multi-tenant system
 type Tenant struct {
-	ID         uuid.UUID `json:"id"`
-	Name       string    `json:"name"`
-	Subdomain  string    `json:"subdomain"`
-	PlanType   string    `json:"plan_type"`
-	Status     string    `json:"status"`
-	SchemaName string    `json:"schema_name"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uuid.UUID      `json:"id"`
+	Name       string         `json:"name"`
+	Subdomain  string         `json:"subdomain"`
+	PlanType   string         `json:"plan_type"`
+	Status     string         `json:"status"`
+	SchemaName string         `json:"schema_name"`
+	Metadata   TenantMetadata `json:"metadata"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
 // Context represents the current tenant context for a request
@@ -37,12 +38,11 @@ type Limits struct {
 
 // Stats represents usage statistics for a tenant
 type Stats struct {
-	TenantID      uuid.UUID `json:"tenant_id"`
-	UserCount     int       `json:"user_count"`
-	ProjectCount  int       `json:"project_count"`
-	StorageUsedGB float64   `json:"storage_used_gb"`
-	LastActivity  time.Time `json:"last_activity"`
-	SchemaExists  bool      `json:"schema_exists"`
+	TenantID          uuid.UUID `json:"tenant_id"`
+	SchemaExists      bool      `json:"schema_exists"`
+	AppliedMigrations int       `json:"applied_migrations"`
+	// Usage holds the current count for each limit named in LimitsConfig.UsageTables.
+	Usage map[string]int `json:"usage"`
 }
 
 // Migration represents a tenant migration
@@ -93,6 +93,11 @@ type LimitsConfig struct {
 	PlanLimits    map[string]FlexibleLimits `json:"plan_limits"`
 	LimitSchema   *LimitSchema              `json:"limit_schema,omitempty"`
 	DefaultPlan   string                    `json:"default_plan"`
+	// UsageTables maps a limit name to a table in the tenant schema whose row
+	// count is that limit's current usage, e.g. {"max_projects": "projects"}.
+	// Limits not listed here are not checked unless a custom UsageTracker
+	// supplies a value.
+	UsageTables map[string]string `json:"usage_tables"`
 }
 
 // LoggerConfig contains logging configuration

@@ -30,14 +30,12 @@ func NewTestHelpers() *TestHelpers {
 // MockRepository implements tenant.Repository for testing
 type MockRepository struct {
 	tenants map[uuid.UUID]*tenant.Tenant
-	stats   map[uuid.UUID]*tenant.Stats
 }
 
 // NewMockRepository creates a new mock repository
 func NewMockRepository() *MockRepository {
 	return &MockRepository{
 		tenants: make(map[uuid.UUID]*tenant.Tenant),
-		stats:   make(map[uuid.UUID]*tenant.Stats),
 	}
 }
 
@@ -131,26 +129,15 @@ func (m *MockRepository) List(ctx context.Context, page, perPage int) ([]*tenant
 	return activeTenants[start:end], total, nil
 }
 
-func (m *MockRepository) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.Stats, error) {
-	stats, exists := m.stats[tenantID]
-	if !exists {
-		// Return default stats
-		stats = &tenant.Stats{
-			TenantID:      tenantID,
-			UserCount:     0,
-			ProjectCount:  0,
-			StorageUsedGB: 0.0,
-			LastActivity:  time.Now(),
-			SchemaExists:  true,
+// FindByMetadata returns tenants whose metadata[key] equals value.
+func (m *MockRepository) FindByMetadata(ctx context.Context, key, value string) ([]*tenant.Tenant, error) {
+	var out []*tenant.Tenant
+	for _, t := range m.tenants {
+		if s, ok := t.Metadata.GetString(key); ok && s == value {
+			out = append(out, t)
 		}
-		m.stats[tenantID] = stats
 	}
-	return stats, nil
-}
-
-// SetStats allows setting stats for testing
-func (m *MockRepository) SetStats(tenantID uuid.UUID, stats *tenant.Stats) {
-	m.stats[tenantID] = stats
+	return out, nil
 }
 
 // MockSchemaManager implements tenant.SchemaManager for testing
@@ -170,10 +157,10 @@ func NewMockSchemaManager(prefix string) *MockSchemaManager {
 	}
 }
 
-func (m *MockSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID, name string) error {
-	if m.schemas[tenantID] {
-		return errors.New("schema already exists")
-	}
+// CreateTenantSchema mirrors the real SchemaManager's "CREATE SCHEMA IF NOT
+// EXISTS" behaviour: creating an already-existing schema is not an error, so
+// a resumable ProvisionTenant retry can call it again safely.
+func (m *MockSchemaManager) CreateTenantSchema(ctx context.Context, tenantID uuid.UUID) error {
 	m.schemas[tenantID] = true
 	return nil
 }
@@ -189,13 +176,6 @@ func (m *MockSchemaManager) SchemaExists(ctx context.Context, tenantID uuid.UUID
 
 func (m *MockSchemaManager) GetSchemaName(tenantID uuid.UUID) string {
 	return fmt.Sprintf("%s%s", m.prefix, tenantID.String())
-}
-
-func (m *MockSchemaManager) SetSearchPath(db *sql.DB, tenantID uuid.UUID) error {
-	if !m.schemas[tenantID] {
-		return errors.New("schema does not exist")
-	}
-	return nil
 }
 
 func (m *MockSchemaManager) ListTenantSchemas(ctx context.Context) ([]string, error) {
@@ -253,6 +233,11 @@ func (m *MockMigrationManager) ApplyToAllTenants(ctx context.Context, migration 
 	}
 	return nil
 }
+
+func (m *MockMigrationManager) ApplyPending(ctx context.Context, tenantID uuid.UUID) error {
+	return nil
+}
+func (m *MockMigrationManager) ApplyPendingToAllTenants(ctx context.Context) error { return nil }
 
 func (m *MockMigrationManager) GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*tenant.Migration, error) {
 	migrations := m.appliedMigrations[tenantID]

@@ -34,6 +34,9 @@ Both files live in the root package and share one database discovery helper
 testcontainers (Docker required). They skip only under `-short` or when no
 database can be found.
 
+Tenants are provisioned from `testdata/migrations` (projects, tenant_users)
+via `testConfig`.
+
 - **`database_integration_test.go`** - Schema isolation, search_path safety, connection reset, migrations, limit enforcement, schema listing
 - **`integration_test.go`** - Tenant lifecycle, resolver with real data, concurrent creation
 
@@ -141,7 +144,10 @@ go tool cover -html=coverage.out -o coverage.html
 - **Schema Isolation**: Tenant tables, indexes, functions and triggers live only in the tenant schema
 - **Connection Safety**: `GetTenantConn` resets search_path on close; `WithTenantTx` isolation under concurrency
 - **Migrations**: Apply, idempotent re-apply, failure not recorded, rollback, bulk apply with partial failure
-- **Limits**: Default usage tracker rejects usage above plan limits
+- **Provisioning**: `ProvisionTenant` applies fixture migrations in order and records them; re-provisioning after a failing migration resumes and completes; an empty `MigrationsDir` yields an empty schema; `ApplyPendingToAllTenants` brings an older, already-active tenant up to date
+- **Metadata**: Round-trips through Create/Get/Update/List and `FindByMetadata`; the `metadata` column is added correctly to a pre-existing `tenants` table
+- **Limits**: Default usage tracker rejects usage above plan limits; counts a configured table and skips an unconfigured limit
+- **Hooks**: `TestDatabase_Hooks_ProvisionedHookCanPersistMetadata` proves a hook can persist metadata via `UpdateTenant` from inside `OnTenantProvisioned`, against a real database, through `CreateTenant` and `ProvisionTenant`. The full create/provision/update/status-change/delete event matrix is covered by unit tests in `tenant/hooks_test.go` against a mock repository
 - **Resolver Integration**: Tenant resolution with real data
 
 ## Mock Objects

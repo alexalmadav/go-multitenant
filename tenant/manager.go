@@ -3,8 +3,10 @@ package tenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -19,7 +21,9 @@ type manager struct {
 	migrationMgr  MigrationManager
 	limitChecker  LimitChecker
 	logger        *zap.Logger
-	connections   map[uuid.UUID]*sql.DB // Tenant-specific connections
+
+	hooksMu sync.RWMutex
+	hooks   []Hook
 }
 
 // NewManager creates a new tenant manager
@@ -32,8 +36,48 @@ func NewManager(config Config, db *sql.DB, repository Repository, schemaManager 
 		migrationMgr:  migrationMgr,
 		limitChecker:  limitChecker,
 		logger:        logger.Named("tenant_manager"),
-		connections:   make(map[uuid.UUID]*sql.DB),
 	}
+}
+
+// RegisterHook adds a lifecycle hook. Safe to call while requests are running.
+func (m *manager) RegisterHook(h Hook) {
+	m.hooksMu.Lock()
+	defer m.hooksMu.Unlock()
+	m.hooks = append(m.hooks, h)
+}
+
+// snapshotHooks returns the registered hooks in order.
+func (m *manager) snapshotHooks() []Hook {
+	m.hooksMu.RLock()
+	defer m.hooksMu.RUnlock()
+	return append([]Hook(nil), m.hooks...)
+}
+
+// validateMetadataHooks runs ValidateMetadata on every hook; the first error blocks the write.
+func (m *manager) validateMetadataHooks(ctx context.Context, t *Tenant) error {
+	for _, h := range m.snapshotHooks() {
+		if err := h.ValidateMetadata(ctx, t); err != nil {
+			return &ValidationError{Field: "metadata", Message: fmt.Sprintf("%s: %v", h.Name(), err)}
+		}
+	}
+	return nil
+}
+
+// runHooks calls fn for every hook, collects failures, and returns a HookError
+// if any failed. Every hook runs even when an earlier one fails.
+func (m *manager) runHooks(event string, fn func(Hook) error) error {
+	var errs []error
+	for _, h := range m.snapshotHooks() {
+		if err := fn(h); err != nil {
+			m.logger.Error("Lifecycle hook failed",
+				zap.String("event", event), zap.String("hook", h.Name()), zap.Error(err))
+			errs = append(errs, fmt.Errorf("%s: %w", h.Name(), err))
+		}
+	}
+	if len(errs) > 0 {
+		return &HookError{Event: event, Errors: errs}
+	}
+	return nil
 }
 
 // CreateTenant creates a new tenant
@@ -58,6 +102,13 @@ func (m *manager) CreateTenant(ctx context.Context, tenant *Tenant) error {
 	if tenant.PlanType == "" {
 		tenant.PlanType = PlanBasic
 	}
+	if tenant.Metadata == nil {
+		tenant.Metadata = TenantMetadata{}
+	}
+
+	if err := m.validateMetadataHooks(ctx, tenant); err != nil {
+		return err
+	}
 
 	// Create tenant record
 	if err := m.repository.Create(ctx, tenant); err != nil {
@@ -69,7 +120,7 @@ func (m *manager) CreateTenant(ctx context.Context, tenant *Tenant) error {
 		zap.String("name", tenant.Name),
 		zap.String("subdomain", tenant.Subdomain))
 
-	return nil
+	return m.runHooks("created", func(h Hook) error { return h.OnTenantCreated(ctx, tenant) })
 }
 
 // GetTenant retrieves a tenant by ID
@@ -87,13 +138,44 @@ func (m *manager) UpdateTenant(ctx context.Context, tenant *Tenant) error {
 	if err := m.validateTenant(tenant); err != nil {
 		return fmt.Errorf("validation failed: %w", err)
 	}
+	if tenant.Metadata == nil {
+		tenant.Metadata = TenantMetadata{}
+	}
+	if err := m.validateMetadataHooks(ctx, tenant); err != nil {
+		return err
+	}
 
-	return m.repository.Update(ctx, tenant)
+	before, err := m.repository.GetByID(ctx, tenant.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get tenant: %w", err)
+	}
+	if err := m.repository.Update(ctx, tenant); err != nil {
+		return err
+	}
+
+	var errs []error
+	if err := m.runHooks("updated", func(h Hook) error { return h.OnTenantUpdated(ctx, before, tenant) }); err != nil {
+		errs = append(errs, err)
+	}
+	if before.Status != tenant.Status {
+		if err := m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, before.Status) }); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // DeleteTenant soft deletes a tenant
 func (m *manager) DeleteTenant(ctx context.Context, id uuid.UUID) error {
-	return m.repository.Delete(ctx, id)
+	tenant, err := m.repository.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("failed to get tenant: %w", err)
+	}
+	if err := m.repository.Delete(ctx, id); err != nil {
+		return err
+	}
+	tenant.Status = StatusCancelled
+	return m.runHooks("deleted", func(h Hook) error { return h.OnTenantDeleted(ctx, tenant) })
 }
 
 // ListTenants lists tenants with pagination
@@ -101,48 +183,48 @@ func (m *manager) ListTenants(ctx context.Context, page, perPage int) ([]*Tenant
 	return m.repository.List(ctx, page, perPage)
 }
 
-// ProvisionTenant creates the tenant schema and activates the tenant
+// ProvisionTenant creates the tenant schema, applies every pending migration
+// file, and activates the tenant. It is safe to re-run: a failed provision
+// leaves the tenant pending with the work done so far, and the next run
+// continues from there.
 func (m *manager) ProvisionTenant(ctx context.Context, id uuid.UUID) error {
-	// Get tenant
 	tenant, err := m.repository.GetByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
-
-	// Check if already provisioned
-	exists, err := m.schemaManager.SchemaExists(ctx, id)
-	if err != nil {
-		return fmt.Errorf("failed to check schema existence: %w", err)
+	previous := tenant.Status
+	if tenant.Status == StatusCancelled {
+		return fmt.Errorf("cannot provision cancelled tenant %s", id)
 	}
 
-	if exists {
-		m.logger.Info("Tenant schema already exists",
-			zap.String("tenant_id", id.String()))
-		return nil
-	}
-
-	// Create tenant schema
-	if err := m.schemaManager.CreateTenantSchema(ctx, id, tenant.Name); err != nil {
+	if err := m.schemaManager.CreateTenantSchema(ctx, id); err != nil {
 		return fmt.Errorf("failed to create tenant schema: %w", err)
 	}
 
-	// Update tenant status to active
+	if err := m.migrationMgr.ApplyPending(ctx, id); err != nil {
+		return fmt.Errorf("failed to apply migrations: %w", err)
+	}
+
+	if tenant.Status == StatusActive {
+		return nil
+	}
 	tenant.Status = StatusActive
 	if err := m.repository.Update(ctx, tenant); err != nil {
-		// Try to clean up schema if update fails
-		if dropErr := m.schemaManager.DropTenantSchema(ctx, id); dropErr != nil {
-			m.logger.Error("Failed to cleanup schema after provisioning failure",
-				zap.String("tenant_id", id.String()),
-				zap.Error(dropErr))
-		}
-		return fmt.Errorf("failed to update tenant status: %w", err)
+		return fmt.Errorf("failed to activate tenant: %w", err)
 	}
 
 	m.logger.Info("Successfully provisioned tenant",
 		zap.String("tenant_id", id.String()),
 		zap.String("name", tenant.Name))
 
-	return nil
+	var errs []error
+	if err := m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) }); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.runHooks("provisioned", func(h Hook) error { return h.OnTenantProvisioned(ctx, tenant) }); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 // SuspendTenant suspends a tenant
@@ -152,6 +234,7 @@ func (m *manager) SuspendTenant(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
 
+	previous := tenant.Status
 	tenant.Status = StatusSuspended
 	if err := m.repository.Update(ctx, tenant); err != nil {
 		return fmt.Errorf("failed to suspend tenant: %w", err)
@@ -160,7 +243,10 @@ func (m *manager) SuspendTenant(ctx context.Context, id uuid.UUID) error {
 	m.logger.Info("Suspended tenant",
 		zap.String("tenant_id", id.String()))
 
-	return nil
+	if previous == StatusSuspended {
+		return nil
+	}
+	return m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) })
 }
 
 // ActivateTenant activates a tenant
@@ -170,6 +256,7 @@ func (m *manager) ActivateTenant(ctx context.Context, id uuid.UUID) error {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
 
+	previous := tenant.Status
 	tenant.Status = StatusActive
 	if err := m.repository.Update(ctx, tenant); err != nil {
 		return fmt.Errorf("failed to activate tenant: %w", err)
@@ -178,7 +265,10 @@ func (m *manager) ActivateTenant(ctx context.Context, id uuid.UUID) error {
 	m.logger.Info("Activated tenant",
 		zap.String("tenant_id", id.String()))
 
-	return nil
+	if previous == StatusActive {
+		return nil
+	}
+	return m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) })
 }
 
 // ValidateAccess validates if a user has access to a tenant
@@ -237,26 +327,43 @@ func (m *manager) LimitChecker() LimitChecker {
 	return m.limitChecker
 }
 
-// GetStats retrieves tenant usage statistics
+// GetStats reports whether the schema exists, how many migrations are applied,
+// and the current usage for every limit listed in LimitsConfig.UsageTables.
 func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
-	return m.repository.GetStats(ctx, tenantID)
-}
-
-// GetTenantDB returns a database connection with tenant context set.
-//
-// Deprecated: This method is unsafe with connection pools. The search_path is set on
-// one connection, but subsequent queries may use different connections from the pool.
-// Use GetTenantConn or WithTenantTx instead for safe tenant-scoped queries.
-func (m *manager) GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
-	m.logger.Warn("GetTenantDB is deprecated and unsafe with connection pools. Use GetTenantConn or WithTenantTx instead.",
-		zap.String("tenant_id", tenantID.String()))
-
-	// This is fundamentally unsafe but kept for backward compatibility
-	if err := m.schemaManager.SetSearchPath(m.db, tenantID); err != nil {
-		return nil, fmt.Errorf("failed to set tenant context: %w", err)
+	if _, err := m.repository.GetByID(ctx, tenantID); err != nil {
+		return nil, fmt.Errorf("failed to get tenant: %w", err)
+	}
+	exists, err := m.schemaManager.SchemaExists(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check schema: %w", err)
+	}
+	stats := &Stats{TenantID: tenantID, SchemaExists: exists, Usage: make(map[string]int)}
+	if !exists {
+		return stats, nil
 	}
 
-	return m.db, nil
+	applied, err := m.migrationMgr.GetAppliedMigrations(ctx, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list applied migrations: %w", err)
+	}
+	stats.AppliedMigrations = len(applied)
+
+	tracker := m.limitChecker.GetUsageTracker()
+	if tracker == nil {
+		return stats, nil
+	}
+	for limitName := range m.config.Limits.UsageTables {
+		value, err := tracker.GetCurrentUsage(ctx, tenantID, limitName)
+		if err != nil {
+			m.logger.Warn("Failed to read usage",
+				zap.String("tenant_id", tenantID.String()), zap.String("limit", limitName), zap.Error(err))
+			continue
+		}
+		if n, ok := value.(int); ok {
+			stats.Usage[limitName] = n
+		}
+	}
+	return stats, nil
 }
 
 // GetTenantConn returns a dedicated database connection with search_path set to the tenant's schema.
@@ -350,15 +457,6 @@ func (m *manager) WithTenantContext(ctx context.Context, tenantID uuid.UUID) con
 
 // Close closes all resources
 func (m *manager) Close() error {
-	// Close any tenant-specific connections
-	for tenantID, conn := range m.connections {
-		if err := conn.Close(); err != nil {
-			m.logger.Error("Failed to close tenant connection",
-				zap.String("tenant_id", tenantID.String()),
-				zap.Error(err))
-		}
-	}
-
 	return nil
 }
 

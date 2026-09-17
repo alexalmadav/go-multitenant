@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/database/postgres"
@@ -34,6 +35,15 @@ func New(config tenant.Config) (*MultiTenant, error) {
 		return nil, fmt.Errorf("failed to setup logger: %w", err)
 	}
 
+	// Validate the migrations directory early so a typo is visible at startup.
+	if dir := config.Database.MigrationsDir; dir == "" {
+		logger.Warn("MigrationsDir is not set; newly provisioned tenants will have an empty schema")
+	} else if info, err := os.Stat(dir); err != nil {
+		return nil, fmt.Errorf("migrations directory %q: %w", dir, err)
+	} else if !info.IsDir() {
+		return nil, fmt.Errorf("migrations directory %q is not a directory", dir)
+	}
+
 	// Setup database connection
 	db, err := setupDatabase(config.Database)
 	if err != nil {
@@ -43,9 +53,13 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Create repository
 	repository := postgres.NewRepository(db, logger)
 
-	// Create master tables
+	// Create master tables. This also runs the v0.6 -> v0.7 metadata-column
+	// upgrade (ALTER TABLE ... ADD COLUMN IF NOT EXISTS metadata); failing
+	// here silently would leave a *MultiTenant whose every tenant read fails,
+	// so treat it as fatal rather than logging and continuing.
 	if err := repository.CreateMasterTables(context.Background()); err != nil {
-		logger.Warn("Failed to create master tables - they may already exist", zap.Error(err))
+		db.Close()
+		return nil, fmt.Errorf("failed to create master tables: %w", err)
 	}
 
 	// Create schema manager
@@ -55,10 +69,16 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Note: Applications should specify their own migrations directory path
 	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir, schemaManager, repository)
 
-	// Create limit checker with a usage tracker that counts rows in the tenant schema.
-	// Applications can replace it via Manager.LimitChecker().SetUsageTracker.
+	// Create limit checker with a usage tracker that counts rows in the tables
+	// named by config.Limits.UsageTables. Applications can replace it via
+	// Manager.LimitChecker().SetUsageTracker.
 	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
-	limitChecker.SetUsageTracker(postgres.NewUsageTracker(db, schemaManager, logger))
+	usageTracker, err := postgres.NewUsageTracker(db, schemaManager, config.Limits.UsageTables, logger)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to configure usage tracker: %w", err)
+	}
+	limitChecker.SetUsageTracker(usageTracker)
 
 	// Create tenant manager
 	manager := tenant.NewManager(config, db, repository, schemaManager, migrationMgr, limitChecker, logger)
@@ -174,17 +194,22 @@ func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
 
 // Re-export key types and functions for convenience
 type (
-	Tenant    = tenant.Tenant
-	Context   = tenant.Context
-	Config    = tenant.Config
-	Manager   = tenant.Manager
-	Resolver  = tenant.Resolver
-	Limits    = tenant.Limits
-	Stats     = tenant.Stats
-	Migration = tenant.Migration
+	Tenant         = tenant.Tenant
+	Context        = tenant.Context
+	Config         = tenant.Config
+	Manager        = tenant.Manager
+	Resolver       = tenant.Resolver
+	Limits         = tenant.Limits
+	Stats          = tenant.Stats
+	Migration      = tenant.Migration
+	TenantMetadata = tenant.TenantMetadata
 
 	TenantError     = tenant.TenantError
 	ValidationError = tenant.ValidationError
+
+	Hook      = tenant.Hook
+	BaseHook  = tenant.BaseHook
+	HookError = tenant.HookError
 )
 
 // Re-export key constants
@@ -208,4 +233,6 @@ var (
 	DefaultConfig          = tenant.DefaultConfig
 	GetTenantFromContext   = tenant.GetTenantFromContext
 	GetTenantIDFromContext = tenant.GetTenantIDFromContext
+	NewStripeExtension     = tenant.NewStripeExtension
+	NewBrandingExtension   = tenant.NewBrandingExtension
 )

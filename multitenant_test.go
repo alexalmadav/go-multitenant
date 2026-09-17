@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"net/http"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/alexalmadav/go-multitenant/tenant"
@@ -321,10 +323,6 @@ func (m *MockMultiTenantManager) GetStats(ctx context.Context, tenantID uuid.UUI
 	return &tenant.Stats{}, nil
 }
 
-func (m *MockMultiTenantManager) GetTenantDB(ctx context.Context, tenantID uuid.UUID) (*sql.DB, error) {
-	return &sql.DB{}, nil
-}
-
 func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*tenant.Conn, error) {
 	return nil, nil
 }
@@ -345,6 +343,8 @@ func (m *MockMultiTenantManager) Close() error {
 	m.CloseCalled = true
 	return nil
 }
+
+func (m *MockMultiTenantManager) RegisterHook(h tenant.Hook) {}
 
 type MockMultiTenantResolver struct{}
 
@@ -378,5 +378,19 @@ func TestReExportedErrorTypes(t *testing.T) {
 	}
 	if _, ok := validationErr.(*tenant.ValidationError); !ok {
 		t.Error("multitenant.ValidationError should alias tenant.ValidationError")
+	}
+}
+
+func TestNew_RejectsMissingMigrationsDir(t *testing.T) {
+	config := tenant.DefaultConfig()
+	config.Database.DSN = "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
+	config.Database.MigrationsDir = filepath.Join(t.TempDir(), "does-not-exist")
+
+	_, err := New(config)
+	if err == nil {
+		t.Fatalf("expected error for missing migrations directory")
+	}
+	if !strings.Contains(err.Error(), "migrations directory") {
+		t.Errorf("error should mention the migrations directory, got: %v", err)
 	}
 }
