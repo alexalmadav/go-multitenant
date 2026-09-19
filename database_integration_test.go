@@ -2794,8 +2794,40 @@ func TestDatabase_TenantConn_FailedStatementRollsBackAndConnStaysUsable(t *testi
 	}
 }
 
+// assertPlanTypeNeutralized checks that the legacy plan_type column has no
+// default and is nullable, and that each given row's plan_type is NULL —
+// the state the one-time migration must leave behind so a later restart is
+// a no-op instead of re-deriving a plan from a column v0.8 no longer writes.
+func assertPlanTypeNeutralized(t *testing.T, tdb *testDB, ids ...uuid.UUID) {
+	t.Helper()
+	var colDefault sql.NullString
+	var nullable string
+	if err := tdb.db.QueryRow(`SELECT column_default, is_nullable FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='tenants' AND column_name='plan_type'`).Scan(&colDefault, &nullable); err != nil {
+		t.Fatal(err)
+	}
+	if colDefault.Valid {
+		t.Errorf("plan_type still has a default: %q", colDefault.String)
+	}
+	if nullable != "YES" {
+		t.Errorf("plan_type is_nullable = %q, want YES", nullable)
+	}
+	for _, id := range ids {
+		var pt sql.NullString
+		if err := tdb.db.QueryRow(`SELECT plan_type FROM public.tenants WHERE id = $1`, id).Scan(&pt); err != nil {
+			t.Fatal(err)
+		}
+		if pt.Valid {
+			t.Errorf("tenant %s plan_type = %q, want NULL", id, pt.String)
+		}
+	}
+}
+
 // TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce simulates a v0.7 table
-// whose rows have plan_type and no metadata plan, then starts New.
+// whose rows have plan_type and no metadata plan, then starts New. The copy
+// must run exactly once: plan_type ends up nullable with no default and
+// NULL on every row, so a later restart (or a plan-less CreateTenant after
+// the upgrade) can never have a plan re-derived for it from the column.
 func TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce(t *testing.T) {
 	tdb := newTestDB(t)
 	t.Cleanup(tdb.close)
@@ -2844,12 +2876,14 @@ func TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce(t *testing.T) {
 		t.Errorf("existing metadata plan must not be overwritten, got %q", kept.Plan())
 	}
 
-	// Column is left in place for the operator to drop later.
+	// Column is left in place for the operator to drop later, but made
+	// nullable with no default and emptied on every row.
 	var hasCol bool
 	if err := tdb.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
 		WHERE table_schema='public' AND table_name='tenants' AND column_name='plan_type')`).Scan(&hasCol); err != nil || !hasCol {
 		t.Errorf("plan_type column should still exist, exists=%v err=%v", hasCol, err)
 	}
+	assertPlanTypeNeutralized(t, tdb, proID, keepID)
 
 	// Second start is idempotent and new rows never touch plan_type.
 	mt2, err := New(testConfig(connStr))
@@ -2867,6 +2901,112 @@ func TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce(t *testing.T) {
 	if back.Plan() != "enterprise" {
 		t.Errorf("plan on new tenant = %q", back.Plan())
 	}
+
+	// The critical repro of finding #1: a tenant created after the upgrade
+	// WITHOUT SetPlan must not silently acquire "basic" (the legacy
+	// column's old default) on this or any later restart.
+	noPlanID := uuid.New()
+	noPlan := &tenant.Tenant{ID: noPlanID, Name: "no-plan", Subdomain: "plan-none-" + noPlanID.String()[:8]}
+	if err := mt2.Manager.CreateTenant(context.Background(), noPlan); err != nil {
+		t.Fatalf("CreateTenant (no plan): %v", err)
+	}
+	if got, _ := mt2.Manager.GetTenant(context.Background(), noPlanID); got.Plan() != "" {
+		t.Errorf("plan-less tenant right after CreateTenant = %q, want \"\"", got.Plan())
+	}
+
+	// A third start (another restart/deploy) must leave it alone.
+	mt3, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("third New: %v", err)
+	}
+	defer mt3.Close()
+	if got, _ := mt3.Manager.GetTenant(context.Background(), noPlanID); got.Plan() != "" {
+		t.Errorf("plan-less tenant after a second restart = %q, want \"\" (finding #1 regression)", got.Plan())
+	}
+
+	// Nothing in the table should have a non-NULL plan_type any more.
+	var nonNull int
+	if err := tdb.db.QueryRow(`SELECT COUNT(*) FROM public.tenants WHERE plan_type IS NOT NULL`).Scan(&nonNull); err != nil {
+		t.Fatal(err)
+	}
+	if nonNull != 0 {
+		t.Errorf("rows with non-NULL plan_type = %d, want 0", nonNull)
+	}
+}
+
+// TestDatabase_PlanTypeSetPlanEmptySurvivesRestart simulates an operator who
+// deliberately clears a plan that was copied from the legacy plan_type
+// column with SetPlan(""). That must stick across restarts, not be silently
+// reinstated by the migration re-running.
+func TestDatabase_PlanTypeSetPlanEmptySurvivesRestart(t *testing.T) {
+	tdb := newTestDB(t)
+	t.Cleanup(tdb.close)
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	if _, err := tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	// v0.7 shape again.
+	if _, err := tdb.db.Exec(`CREATE TABLE public.tenants (
+		id UUID PRIMARY KEY, name VARCHAR(255) NOT NULL, subdomain VARCHAR(255) UNIQUE NOT NULL,
+		plan_type VARCHAR(50) NOT NULL DEFAULT 'basic', status VARCHAR(50) NOT NULL DEFAULT 'pending',
+		schema_name VARCHAR(255) NOT NULL, metadata JSONB NOT NULL DEFAULT '{}',
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`)
+	})
+	id := uuid.New()
+	if _, err := tdb.db.Exec(`INSERT INTO public.tenants (id, name, subdomain, plan_type, schema_name, metadata) VALUES
+		($1, 'clearme', 'plan-clear-'||$1::text, 'basic', 'tenant_z', '{}')`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	mt, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer mt.Close()
+
+	tn, err := mt.Manager.GetTenant(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tn.Plan() != "basic" {
+		t.Fatalf("plan copied from legacy column = %q, want basic", tn.Plan())
+	}
+
+	tn.SetPlan("")
+	if err := mt.Manager.UpdateTenant(context.Background(), tn); err != nil {
+		t.Fatalf("UpdateTenant: %v", err)
+	}
+	cleared, err := mt.Manager.GetTenant(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Plan() != "" {
+		t.Fatalf("plan right after SetPlan(\"\") = %q, want \"\"", cleared.Plan())
+	}
+
+	// Restart: the cleared plan must not be reinstated from plan_type,
+	// because plan_type was already nulled by the first startup's migration.
+	mt2, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	defer mt2.Close()
+	after, err := mt2.Manager.GetTenant(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Plan() != "" {
+		t.Errorf("plan after restart = %q, want \"\" (finding #1 regression)", after.Plan())
+	}
+	assertPlanTypeNeutralized(t, tdb, id)
 }
 
 func TestDatabase_EnforceLimits_ThroughHTTPMiddleware(t *testing.T) {

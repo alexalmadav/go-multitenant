@@ -302,18 +302,40 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 
 		`ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'`,
 
-		// v0.7 -> v0.8: copy plan_type into metadata["plan"] for rows that
-		// have no plan key yet. Runs only if the legacy column exists and is
-		// idempotent. The column is left for the operator to drop.
+		// v0.7 -> v0.8: move plan_type into metadata["plan"] and neutralise
+		// the column, once. Runs only if the legacy column exists.
+		//
+		// The legacy column is NOT NULL DEFAULT 'basic', and v0.8 never
+		// writes it, so a guard keyed only on "metadata has no plan key"
+		// would match every row created after the upgrade too (its
+		// plan_type is always 'basic' from the default) and re-copy
+		// "basic" into metadata on every restart, undoing SetPlan("") and
+		// stamping plan-less tenants with a plan they never asked for.
+		// Instead, after copying, the column's DEFAULT and NOT NULL are
+		// dropped and every previously non-NULL value is set to NULL, so
+		// "plan_type IS NOT NULL" becomes false for every row from then on
+		// (post-upgrade inserts get a NULL plan_type naturally, since there
+		// is no default any more) and this block is a no-op on later
+		// starts. The column itself is left for the operator to drop.
 		`DO $$
 		BEGIN
 			IF EXISTS (
 				SELECT 1 FROM information_schema.columns
 				WHERE table_schema = 'public' AND table_name = 'tenants' AND column_name = 'plan_type'
 			) THEN
+				IF EXISTS (
+					SELECT 1 FROM information_schema.columns
+					WHERE table_schema = 'public' AND table_name = 'tenants' AND column_name = 'plan_type'
+					  AND (column_default IS NOT NULL OR is_nullable = 'NO')
+				) THEN
+					ALTER TABLE public.tenants ALTER COLUMN plan_type DROP DEFAULT,
+					                           ALTER COLUMN plan_type DROP NOT NULL;
+				END IF;
 				UPDATE public.tenants
-				SET metadata = metadata || jsonb_build_object('plan', plan_type)
-				WHERE plan_type IS NOT NULL AND NOT (metadata ? 'plan');
+				SET metadata = CASE WHEN metadata ? 'plan' THEN metadata
+				                     ELSE metadata || jsonb_build_object('plan', plan_type) END,
+				    plan_type = NULL
+				WHERE plan_type IS NOT NULL;
 			END IF;
 		END $$`,
 	}
