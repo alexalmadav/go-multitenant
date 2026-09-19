@@ -2868,3 +2868,125 @@ func TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce(t *testing.T) {
 		t.Errorf("plan on new tenant = %q", back.Plan())
 	}
 }
+
+func TestDatabase_EnforceLimits_ThroughHTTPMiddleware(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := testConfig(connStr)
+	config.Resolver.Strategy = tenant.ResolverHeader
+	config.Resolver.HeaderName = "X-Tenant"
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer mt.Close()
+	ctx := context.Background()
+
+	id := uuid.New()
+	sub := "enforce-" + id.String()[:8]
+	tn := &tenant.Tenant{ID: id, Name: sub, Subdomain: sub}
+	tn.SetPlan(limits.PlanBasic)
+	if err := mt.Manager.CreateTenant(ctx, tn); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatalf("ProvisionTenant failed: %v", err)
+	}
+	defer cleanupTestData(tdb.db, []uuid.UUID{id})
+
+	seedProjects(t, mt, id, 11) // basic allows 10
+
+	var seen limits.FlexibleLimits
+	h := httpmw.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen, _ = limits.FromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}), mt.HTTPMiddleware.ResolveTenant(), mt.HTTPMiddleware.EnforceLimits())
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Tenant", sub)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("11 projects on basic: got %d %s, want 402", rec.Code, rec.Body.String())
+	}
+
+	// Under the limit, the checked limits reach the handler.
+	if err := mt.Manager.WithTenantTx(ctx, id, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM projects")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("0 projects: got %d %s", rec.Code, rec.Body.String())
+	}
+	if n, _ := seen.GetInt("max_projects"); n != 10 {
+		t.Errorf("limits in context = %v", seen)
+	}
+}
+
+func TestDatabase_Limits_UsageCountsConfiguredTables(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	seedProjects(t, mt, ids[0], 4)
+	usage, err := mt.Limits.Usage(context.Background(), ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage["max_projects"] != 4 || usage["max_users"] != 0 {
+		t.Errorf("usage = %v", usage)
+	}
+}
+
+func TestDatabase_NoLimitsConfigDisablesEnforcement(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	cfg := testConfig(connStr)
+	cfg.Limits = nil
+	mt, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mt.Close()
+	if mt.Limits != nil {
+		t.Fatal("Limits should be nil when Config.Limits is nil")
+	}
+	ctx := context.Background()
+	id := uuid.New()
+	defer cleanupTestData(tdb.db, []uuid.UUID{id})
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: id, Name: "n", Subdomain: "nolimits-" + id.String()[:8]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	seedProjects(t, mt, id, 50)
+	h := httpmw.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
+		withTenantCtx(id), mt.HTTPMiddleware.EnforceLimits())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("EnforceLimits with no checker must pass through, got %d", rec.Code)
+	}
+}
+
+// withTenantCtx injects a resolved tenant context for tests that skip ResolveTenant.
+func withTenantCtx(id uuid.UUID) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), tenant.ContextKeyTenant, &tenant.Context{TenantID: id, Status: tenant.StatusActive})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
