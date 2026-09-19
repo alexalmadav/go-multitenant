@@ -6,7 +6,6 @@
 *.dylib
 *.test
 *.out
-go.work
 go.work.sum
 
 # Coverage reports

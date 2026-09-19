@@ -54,6 +54,20 @@ TEST_DATABASE_URL='postgres://postgres:postgres@localhost:6432/test_multitenant?
 
 ## Running Tests
 
+### Modules
+
+The repository is a Go workspace (`go.work`) of three modules. Run tests
+module by module:
+
+- Root (`go test ./...`): core, `database`, `middleware/httpmw` and the
+  integration suites.
+- `cd middleware/gin && go test ./...`: the Gin adapter and its one
+  integration test.
+- `cd examples && go test ./...`: the Stripe example.
+
+When modules share a single database, as the root and `middleware/gin`
+integration tests do here, run them one at a time rather than in parallel.
+
 ### Unit Tests Only
 
 ```bash
