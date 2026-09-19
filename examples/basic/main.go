@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alexalmadav/go-multitenant"
+	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -43,6 +44,11 @@ func main() {
 	// Setup Gin router with multi-tenant middleware
 	r := gin.Default()
 
+	// Wrap the framework-neutral middleware with the Gin adapter.
+	ginMw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{
+		SkipPaths: []string{"/health"},
+	})
+
 	// Global middleware for health checks
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "healthy"})
@@ -52,11 +58,11 @@ func main() {
 	api := r.Group("/api")
 	{
 		// Apply multi-tenant middleware
-		api.Use(mt.GinMiddleware.ResolveTenant())
-		api.Use(mt.GinMiddleware.ValidateTenant())
-		api.Use(mt.GinMiddleware.EnforceLimits())
-		api.Use(mt.GinMiddleware.SetTenantDB())
-		api.Use(mt.GinMiddleware.LogAccess())
+		api.Use(ginMw.ResolveTenant())
+		api.Use(ginMw.ValidateTenant())
+		api.Use(ginMw.EnforceLimits())
+		api.Use(ginMw.SetTenantDB())
+		api.Use(ginMw.LogAccess())
 
 		// Tenant-specific routes
 		api.GET("/info", getTenantInfo)
