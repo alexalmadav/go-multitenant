@@ -699,18 +699,30 @@ longer know about either.
 
 - **`Tenant.PlanType` is gone; the plan lives in metadata.** Use
   `t.SetPlan("pro")` to set it and `t.Plan()` to read it (backed by
-  `tenant.PlanKey`, `metadata["plan"]`). `New` copies an existing
-  `plan_type` column into `metadata["plan"]` once at startup (for rows that
-  don't already have a `plan` key), and leaves the column in place — nothing
-  reads it after that. Drop it yourself once you've confirmed the copy:
+  `tenant.PlanKey`, `metadata["plan"]`). `New` moves an existing
+  `plan_type` column's values into `metadata["plan"]` once, on first
+  startup after the upgrade (for rows that don't already have a `plan`
+  key). As part of that same one-time step, the column is made nullable
+  with no default and every row's `plan_type` is set to `NULL`, so the
+  move genuinely happens once — later restarts, and tenants created after
+  the upgrade, never have a plan re-derived from the column. The column
+  itself is left in place; nothing reads it after the first startup. Drop
+  it yourself whenever you're ready:
   ```sql
   ALTER TABLE public.tenants DROP COLUMN plan_type;
   ```
 - **`CreateTenant` no longer defaults the plan to `basic`.** A tenant created
   without calling `SetPlan` has `Plan() == ""`. With limit enforcement on,
-  `CheckTenant` (and `EnforceLimits` middleware) on that tenant returns an
-  error — an empty string is not a configured plan. Call `t.SetPlan(...)`
-  before `CreateTenant` if you enforce limits.
+  `CheckTenant` (and `EnforceLimits` middleware) on that tenant returns a
+  `*tenant.TenantError` with code `PLAN_NOT_CONFIGURED` — an empty string is
+  not a configured plan. Call `t.SetPlan(...)` before `CreateTenant` if you
+  enforce limits.
+- **An unconfigured plan under enforcement is now a 403, not a 500.** A
+  tenant whose plan (including the empty plan) has no entry in
+  `limits.Config.PlanLimits` is refused with `PLAN_NOT_CONFIGURED` (HTTP 403
+  via `EnforceLimits`) rather than the opaque `LIMIT_CHECK_FAILED` 500 of
+  earlier v0.8 builds. Fix it by setting the plan on creation with
+  `SetPlan`, or by supplying a fallback via `limits.Config.PlanOf`.
 - **Limits are now an optional package, `limits`.** `FlexibleLimits`,
   `LimitType`/`LimitTypeInt`/etc., `LimitSchema`, `LimitDefinition`,
   `UsageTracker`, and the checker itself all moved from `tenant` to `limits`

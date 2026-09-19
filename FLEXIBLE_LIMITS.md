@@ -311,6 +311,12 @@ Configuration and the checker also moved:
   fall back to the plan's configured limits. Read those directly with
   `mt.Limits.GetLimitsForPlan(t.Plan())` when you need them regardless of
   enforcement.
+- With enforcement on, a tenant whose plan is not a key in `PlanLimits`
+  (including the empty plan) is refused with a `*tenant.TenantError` of code
+  `PLAN_NOT_CONFIGURED` — `CheckLimit`, `CheckTenant`, and `CheckAllLimits`
+  all agree on this — surfaced by `EnforceLimits` middleware as HTTP 403; set
+  the plan on creation with `SetPlan`, or supply a fallback via
+  `limits.Config.PlanOf`.
 
 ## Example Application
 
