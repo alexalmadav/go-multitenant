@@ -1,4 +1,4 @@
-package tenant
+package limits
 
 import (
 	"testing"

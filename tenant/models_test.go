@@ -149,24 +149,6 @@ func TestContext_Fields(t *testing.T) {
 	}
 }
 
-func TestLimits_Fields(t *testing.T) {
-	limits := Limits{
-		MaxUsers:     10,
-		MaxProjects:  20,
-		MaxStorageGB: 5,
-	}
-
-	if limits.MaxUsers != 10 {
-		t.Errorf("Limits.MaxUsers = %v, want %v", limits.MaxUsers, 10)
-	}
-	if limits.MaxProjects != 20 {
-		t.Errorf("Limits.MaxProjects = %v, want %v", limits.MaxProjects, 20)
-	}
-	if limits.MaxStorageGB != 5 {
-		t.Errorf("Limits.MaxStorageGB = %v, want %v", limits.MaxStorageGB, 5)
-	}
-}
-
 func TestStats_Fields(t *testing.T) {
 	tenantID := uuid.New()
 
@@ -174,7 +156,6 @@ func TestStats_Fields(t *testing.T) {
 		TenantID:          tenantID,
 		SchemaExists:      true,
 		AppliedMigrations: 2,
-		Usage:             map[string]int{"max_projects": 3},
 	}
 
 	if stats.TenantID != tenantID {
@@ -185,9 +166,6 @@ func TestStats_Fields(t *testing.T) {
 	}
 	if stats.AppliedMigrations != 2 {
 		t.Errorf("Stats.AppliedMigrations = %v, want %v", stats.AppliedMigrations, 2)
-	}
-	if stats.Usage["max_projects"] != 3 {
-		t.Errorf(`Stats.Usage["max_projects"] = %v, want %v`, stats.Usage["max_projects"], 3)
 	}
 }
 
@@ -251,25 +229,6 @@ func TestDefaultConfig(t *testing.T) {
 		t.Error("DefaultConfig.Resolver.ReservedSubdomain should have reserved subdomains")
 	}
 
-	// Test limits config
-	if !config.Limits.EnforceLimits {
-		t.Error("DefaultConfig.Limits.EnforceLimits should be true")
-	}
-	if config.Limits.DefaultPlan != PlanBasic {
-		t.Errorf("DefaultConfig.Limits.DefaultPlan = %v, want %v", config.Limits.DefaultPlan, PlanBasic)
-	}
-
-	// Test plan limits exist
-	if config.Limits.PlanLimits[PlanBasic] == nil {
-		t.Error("DefaultConfig should have basic plan limits")
-	}
-	if config.Limits.PlanLimits[PlanPro] == nil {
-		t.Error("DefaultConfig should have pro plan limits")
-	}
-	if config.Limits.PlanLimits[PlanEnterprise] == nil {
-		t.Error("DefaultConfig should have enterprise plan limits")
-	}
-
 	// Test logger config
 	if config.Logger.Level != "info" {
 		t.Errorf("DefaultConfig.Logger.Level = %v, want %v", config.Logger.Level, "info")
@@ -292,17 +251,6 @@ func TestConstants(t *testing.T) {
 	}
 	if StatusCancelled != "cancelled" {
 		t.Errorf("StatusCancelled = %v, want %v", StatusCancelled, "cancelled")
-	}
-
-	// Test plan constants
-	if PlanBasic != "basic" {
-		t.Errorf("PlanBasic = %v, want %v", PlanBasic, "basic")
-	}
-	if PlanPro != "pro" {
-		t.Errorf("PlanPro = %v, want %v", PlanPro, "pro")
-	}
-	if PlanEnterprise != "enterprise" {
-		t.Errorf("PlanEnterprise = %v, want %v", PlanEnterprise, "enterprise")
 	}
 
 	// Test resolver constants

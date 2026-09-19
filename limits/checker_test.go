@@ -1,4 +1,4 @@
-package tenant
+package limits
 
 import (
 	"context"
@@ -6,27 +6,27 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
 	"go.uber.org/zap/zaptest"
 )
 
-func TestNewLimitChecker(t *testing.T) {
+func TestNewChecker(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits:    make(map[string]FlexibleLimits),
 	}
 
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
 
-	checker := NewLimitChecker(config, mockRepo, logger)
+	checker := NewChecker(config, mockRepo, logger)
 	if checker == nil {
-		t.Error("NewLimitChecker() should not return nil")
+		t.Error("NewChecker() should not return nil")
 	}
 }
 
-func TestLimitChecker_CheckLimit(t *testing.T) {
+func TestChecker_CheckLimit(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
 	// Create test plan limits
@@ -37,24 +37,23 @@ func TestLimitChecker_CheckLimit(t *testing.T) {
 	basicLimits.Set("region", LimitTypeString, "us-east")
 	basicLimits.Set("unlimited_api", LimitTypeInt, -1) // unlimited
 
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits: map[string]FlexibleLimits{
 			PlanBasic: basicLimits,
 		},
 	}
 
 	tenantID := uuid.New()
-	basicTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	basicTenant := &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive}
 	basicTenant.SetPlan(PlanBasic)
-	mockRepo := &MockLimitCheckerRepository{
-		tenants: map[uuid.UUID]*Tenant{
+	mockRepo := &MockCheckerRepository{
+		tenants: map[uuid.UUID]*tenant.Tenant{
 			tenantID: basicTenant,
 		},
 	}
 
-	checker := NewLimitChecker(config, mockRepo, logger)
+	checker := NewChecker(config, mockRepo, logger)
 
 	tests := []struct {
 		name         string
@@ -134,24 +133,23 @@ func TestLimitChecker_CheckLimit(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_CheckLimit_EnforcementDisabled(t *testing.T) {
+func TestChecker_CheckLimit_EnforcementDisabled(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: false, // Disabled
-		DefaultPlan:   PlanBasic,
 	}
 
 	tenantID := uuid.New()
-	basicTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	basicTenant := &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive}
 	basicTenant.SetPlan(PlanBasic)
-	mockRepo := &MockLimitCheckerRepository{
-		tenants: map[uuid.UUID]*Tenant{
+	mockRepo := &MockCheckerRepository{
+		tenants: map[uuid.UUID]*tenant.Tenant{
 			tenantID: basicTenant,
 		},
 	}
 
-	checker := NewLimitChecker(config, mockRepo, logger)
+	checker := NewChecker(config, mockRepo, logger)
 
 	// Should not error even with exceeded limits when enforcement is disabled
 	err := checker.CheckLimit(context.Background(), tenantID, "max_users", 1000)
@@ -160,7 +158,7 @@ func TestLimitChecker_CheckLimit_EnforcementDisabled(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_CheckAllLimits(t *testing.T) {
+func TestChecker_CheckAllLimits(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 
 	// Create test plan limits
@@ -168,24 +166,23 @@ func TestLimitChecker_CheckAllLimits(t *testing.T) {
 	basicLimits.Set("max_users", LimitTypeInt, 10)
 	basicLimits.Set("max_storage_gb", LimitTypeFloat, 5.0)
 
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits: map[string]FlexibleLimits{
 			PlanBasic: basicLimits,
 		},
 	}
 
 	tenantID := uuid.New()
-	basicTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	basicTenant := &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive}
 	basicTenant.SetPlan(PlanBasic)
-	mockRepo := &MockLimitCheckerRepository{
-		tenants: map[uuid.UUID]*Tenant{
+	mockRepo := &MockCheckerRepository{
+		tenants: map[uuid.UUID]*tenant.Tenant{
 			tenantID: basicTenant,
 		},
 	}
 
-	checker := NewLimitChecker(config, mockRepo, logger)
+	checker := NewChecker(config, mockRepo, logger)
 
 	// Test with valid limits
 	err := checker.CheckAllLimits(context.Background(), tenantID)
@@ -201,16 +198,15 @@ func TestLimitChecker_CheckAllLimits(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_PlanLimitManagement(t *testing.T) {
+func TestChecker_PlanLimitManagement(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits:    make(map[string]FlexibleLimits),
 	}
 
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger)
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger)
 
 	// Test getting non-existent plan limits
 	limits := checker.GetLimitsForPlan("non-existent")
@@ -234,17 +230,16 @@ func TestLimitChecker_PlanLimitManagement(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_LimitManagement(t *testing.T) {
+func TestChecker_LimitManagement(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits:    make(map[string]FlexibleLimits),
 		LimitSchema:   DefaultLimitSchema(),
 	}
 
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger)
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger)
 
 	// Test adding limit
 	err := checker.AddLimit(PlanBasic, "test_limit", LimitTypeInt, 5)
@@ -290,18 +285,17 @@ func TestLimitChecker_LimitManagement(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_SchemaManagement(t *testing.T) {
+func TestChecker_SchemaManagement(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	schema := DefaultLimitSchema()
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits:    make(map[string]FlexibleLimits),
 		LimitSchema:   schema,
 	}
 
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger)
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger)
 
 	// Test getting schema
 	retrievedSchema := checker.GetLimitSchema()
@@ -319,17 +313,16 @@ func TestLimitChecker_SchemaManagement(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_ValidateLimits(t *testing.T) {
+func TestChecker_ValidateLimits(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits:    make(map[string]FlexibleLimits),
 		LimitSchema:   DefaultLimitSchema(),
 	}
 
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger)
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger)
 
 	testLimits := make(FlexibleLimits)
 	testLimits.Set("max_users", LimitTypeInt, 10)
@@ -342,16 +335,15 @@ func TestLimitChecker_ValidateLimits(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_UsageTracker(t *testing.T) {
+func TestChecker_UsageTracker(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{
+	config := Config{
 		EnforceLimits: true,
-		DefaultPlan:   PlanBasic,
 		PlanLimits:    make(map[string]FlexibleLimits),
 	}
 
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger)
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger)
 
 	// Test getting usage tracker (should be nil initially)
 	tracker := checker.GetUsageTracker()
@@ -369,11 +361,11 @@ func TestLimitChecker_UsageTracker(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_validateIntLimit(t *testing.T) {
+func TestChecker_validateIntLimit(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{EnforceLimits: true}
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger).(*limitChecker)
+	config := Config{EnforceLimits: true}
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger).(*checker)
 
 	tenantID := uuid.New()
 	limit := &LimitValue{Type: LimitTypeInt, Value: 10}
@@ -402,11 +394,11 @@ func TestLimitChecker_validateIntLimit(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_validateFloatLimit(t *testing.T) {
+func TestChecker_validateFloatLimit(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{EnforceLimits: true}
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger).(*limitChecker)
+	config := Config{EnforceLimits: true}
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger).(*checker)
 
 	tenantID := uuid.New()
 	limit := &LimitValue{Type: LimitTypeFloat, Value: 10.5}
@@ -435,11 +427,11 @@ func TestLimitChecker_validateFloatLimit(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_validateBoolLimit(t *testing.T) {
+func TestChecker_validateBoolLimit(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{EnforceLimits: true}
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger).(*limitChecker)
+	config := Config{EnforceLimits: true}
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger).(*checker)
 
 	tenantID := uuid.New()
 
@@ -467,11 +459,11 @@ func TestLimitChecker_validateBoolLimit(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_validateStringLimit(t *testing.T) {
+func TestChecker_validateStringLimit(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{EnforceLimits: true}
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger).(*limitChecker)
+	config := Config{EnforceLimits: true}
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger).(*checker)
 
 	tenantID := uuid.New()
 	limit := &LimitValue{Type: LimitTypeString, Value: "short"}
@@ -507,11 +499,11 @@ func TestLimitChecker_validateStringLimit(t *testing.T) {
 	}
 }
 
-func TestLimitChecker_validateDurationLimit(t *testing.T) {
+func TestChecker_validateDurationLimit(t *testing.T) {
 	logger := zaptest.NewLogger(t)
-	config := LimitsConfig{EnforceLimits: true}
-	mockRepo := &MockLimitCheckerRepository{tenants: make(map[uuid.UUID]*Tenant)}
-	checker := NewLimitChecker(config, mockRepo, logger).(*limitChecker)
+	config := Config{EnforceLimits: true}
+	mockRepo := &MockCheckerRepository{tenants: make(map[uuid.UUID]*tenant.Tenant)}
+	checker := NewChecker(config, mockRepo, logger).(*checker)
 
 	tenantID := uuid.New()
 	limit := &LimitValue{Type: LimitTypeDuration, Value: "5m"}
@@ -525,51 +517,51 @@ func TestLimitChecker_validateDurationLimit(t *testing.T) {
 
 // Mock implementations for limit checker tests
 
-type MockLimitCheckerRepository struct {
-	tenants map[uuid.UUID]*Tenant
+type MockCheckerRepository struct {
+	tenants map[uuid.UUID]*tenant.Tenant
 }
 
-func (m *MockLimitCheckerRepository) Create(ctx context.Context, tenant *Tenant) error {
-	m.tenants[tenant.ID] = tenant
+func (m *MockCheckerRepository) Create(ctx context.Context, t *tenant.Tenant) error {
+	m.tenants[t.ID] = t
 	return nil
 }
 
-func (m *MockLimitCheckerRepository) GetByID(ctx context.Context, id uuid.UUID) (*Tenant, error) {
-	tenant, exists := m.tenants[id]
+func (m *MockCheckerRepository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
+	t, exists := m.tenants[id]
 	if !exists {
-		return nil, &TenantError{TenantID: id, Code: "NOT_FOUND", Message: "tenant not found"}
+		return nil, &tenant.TenantError{TenantID: id, Code: "NOT_FOUND", Message: "tenant not found"}
 	}
-	return tenant, nil
+	return t, nil
 }
 
-func (m *MockLimitCheckerRepository) GetBySubdomain(ctx context.Context, subdomain string) (*Tenant, error) {
-	for _, tenant := range m.tenants {
-		if tenant.Subdomain == subdomain {
-			return tenant, nil
+func (m *MockCheckerRepository) GetBySubdomain(ctx context.Context, subdomain string) (*tenant.Tenant, error) {
+	for _, t := range m.tenants {
+		if t.Subdomain == subdomain {
+			return t, nil
 		}
 	}
-	return nil, &TenantError{Code: "NOT_FOUND", Message: "tenant not found"}
+	return nil, &tenant.TenantError{Code: "NOT_FOUND", Message: "tenant not found"}
 }
 
-func (m *MockLimitCheckerRepository) Update(ctx context.Context, tenant *Tenant) error {
-	m.tenants[tenant.ID] = tenant
+func (m *MockCheckerRepository) Update(ctx context.Context, t *tenant.Tenant) error {
+	m.tenants[t.ID] = t
 	return nil
 }
 
-func (m *MockLimitCheckerRepository) Delete(ctx context.Context, id uuid.UUID) error {
+func (m *MockCheckerRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	delete(m.tenants, id)
 	return nil
 }
 
-func (m *MockLimitCheckerRepository) List(ctx context.Context, page, perPage int) ([]*Tenant, int, error) {
-	var tenants []*Tenant
-	for _, tenant := range m.tenants {
-		tenants = append(tenants, tenant)
+func (m *MockCheckerRepository) List(ctx context.Context, page, perPage int) ([]*tenant.Tenant, int, error) {
+	var tenants []*tenant.Tenant
+	for _, t := range m.tenants {
+		tenants = append(tenants, t)
 	}
 	return tenants, len(tenants), nil
 }
 
-func (m *MockLimitCheckerRepository) FindByMetadata(ctx context.Context, key, value string) ([]*Tenant, error) {
+func (m *MockCheckerRepository) FindByMetadata(ctx context.Context, key, value string) ([]*tenant.Tenant, error) {
 	return nil, nil
 }
 
@@ -585,7 +577,7 @@ func (m *MockUsageTracker) GetCurrentUsage(ctx context.Context, tenantID uuid.UU
 	case "advanced_features":
 		return false, nil
 	default:
-		return nil, &TenantError{Code: "UNKNOWN_LIMIT", Message: "unknown limit"}
+		return nil, &tenant.TenantError{Code: "UNKNOWN_LIMIT", Message: "unknown limit"}
 	}
 }
 
@@ -601,15 +593,15 @@ func (m *MockUsageTracker) ResetUsage(ctx context.Context, tenantID uuid.UUID, l
 	return nil // Mock implementation
 }
 
-func TestLimitChecker_ConcurrentAddLimitAndCheckLimitIsRaceFree(t *testing.T) {
+func TestChecker_ConcurrentAddLimitAndCheckLimitIsRaceFree(t *testing.T) {
 	tenantID := uuid.New()
-	raceTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	raceTenant := &tenant.Tenant{ID: tenantID, Status: tenant.StatusActive}
 	raceTenant.SetPlan(PlanBasic)
-	mockRepo := &MockLimitCheckerRepository{tenants: map[uuid.UUID]*Tenant{
+	mockRepo := &MockCheckerRepository{tenants: map[uuid.UUID]*tenant.Tenant{
 		tenantID: raceTenant,
 	}}
-	config := DefaultConfig().Limits
-	checker := NewLimitChecker(config, mockRepo, zaptest.NewLogger(t))
+	config := ExampleConfig()
+	checker := NewChecker(config, mockRepo, zaptest.NewLogger(t))
 
 	done := make(chan struct{})
 	go func() {

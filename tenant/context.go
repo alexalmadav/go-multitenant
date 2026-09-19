@@ -35,14 +35,3 @@ func UserIDFromContext(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(ContextKeyUserID).(string)
 	return id, ok
 }
-
-// WithPlanLimits returns a context carrying the tenant's checked limits.
-func WithPlanLimits(ctx context.Context, l *Limits) context.Context {
-	return context.WithValue(ctx, ContextKeyPlanLimits, l)
-}
-
-// PlanLimitsFromContext returns the limits set by EnforceLimits.
-func PlanLimitsFromContext(ctx context.Context) (*Limits, bool) {
-	l, ok := ctx.Value(ContextKeyPlanLimits).(*Limits)
-	return l, ok
-}

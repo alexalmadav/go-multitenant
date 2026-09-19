@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"go.uber.org/zap"
 )
@@ -35,10 +36,19 @@ type Middleware struct {
 	resolver tenant.Resolver
 	logger   *zap.Logger
 	config   Config
+	limits   limits.Enforcer
+}
+
+// Option configures a Middleware.
+type Option func(*Middleware)
+
+// WithLimits enables plan-limit enforcement in EnforceLimits and Standard.
+func WithLimits(e limits.Enforcer) Option {
+	return func(m *Middleware) { m.limits = e }
 }
 
 // New creates a Middleware.
-func New(manager tenant.Manager, resolver tenant.Resolver, logger *zap.Logger, cfg Config) *Middleware {
+func New(manager tenant.Manager, resolver tenant.Resolver, logger *zap.Logger, cfg Config, opts ...Option) *Middleware {
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = DefaultErrorHandler
 	}
@@ -48,7 +58,11 @@ func New(manager tenant.Manager, resolver tenant.Resolver, logger *zap.Logger, c
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Middleware{manager: manager, resolver: resolver, logger: logger.Named("http_middleware"), config: cfg}
+	m := &Middleware{manager: manager, resolver: resolver, logger: logger.Named("http_middleware"), config: cfg}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Chain applies middlewares in order: Chain(h, a, b) handles a request as a -> b -> h.
@@ -59,7 +73,8 @@ func Chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler 
 	return h
 }
 
-// Standard is ResolveTenant, ValidateTenant, EnforceLimits and SetTenantDB in that order.
+// Standard is ResolveTenant, ValidateTenant, EnforceLimits and SetTenantDB in
+// that order. EnforceLimits is a pass-through unless New was given WithLimits.
 func (m *Middleware) Standard() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return Chain(next, m.ResolveTenant(), m.ValidateTenant(), m.EnforceLimits(), m.SetTenantDB())
@@ -142,32 +157,51 @@ func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 	}
 }
 
-// EnforceLimits checks the tenant's plan limits and stores them in the context.
+// EnforceLimits checks plan limits for the resolved tenant with the enforcer
+// given to New via WithLimits. Without that option it is a pass-through.
+// Requests on a SkipPaths prefix bypass the check.
 func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
+	inner := EnforceLimits(m.limits, m.config.ErrorHandler)
 	return func(next http.Handler) http.Handler {
+		guarded := inner(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if m.shouldSkipPath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
+			guarded.ServeHTTP(w, r)
+		})
+	}
+}
 
+// EnforceLimits checks the resolved tenant's plan limits with e and stores
+// the checked limits in the context (read them with limits.FromContext).
+// A nil e is a pass-through. A nil errorHandler uses DefaultErrorHandler.
+func EnforceLimits(e limits.Enforcer, errorHandler func(http.ResponseWriter, *http.Request, error)) func(http.Handler) http.Handler {
+	if errorHandler == nil {
+		errorHandler = DefaultErrorHandler
+	}
+	return func(next http.Handler) http.Handler {
+		if e == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tc, ok := tenant.GetTenantFromContext(r.Context())
 			if !ok {
-				m.config.ErrorHandler(w, r, &tenant.TenantError{Code: "TENANT_CONTEXT_MISSING", Message: "Tenant context not found"})
+				errorHandler(w, r, &tenant.TenantError{Code: "TENANT_CONTEXT_MISSING", Message: "Tenant context not found"})
 				return
 			}
-			limits, err := m.manager.CheckLimits(r.Context(), tc.TenantID)
+			checked, err := e.CheckTenant(r.Context(), tc.TenantID)
 			if err != nil {
-				m.logger.Error("Plan limits check failed", zap.String("tenant_id", tc.TenantID.String()), zap.Error(err))
 				var tenantErr *tenant.TenantError
 				if errors.As(err, &tenantErr) && (tenantErr.Code == "LIMIT_EXCEEDED" || tenantErr.Code == "FEATURE_NOT_ALLOWED") {
-					m.config.ErrorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "PLAN_LIMIT_EXCEEDED", Message: tenantErr.Message})
+					errorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "PLAN_LIMIT_EXCEEDED", Message: tenantErr.Message})
 				} else {
-					m.config.ErrorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "LIMIT_CHECK_FAILED", Message: "Unable to verify plan limits"})
+					errorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "LIMIT_CHECK_FAILED", Message: "Unable to verify plan limits"})
 				}
 				return
 			}
-			next.ServeHTTP(w, r.WithContext(tenant.WithPlanLimits(r.Context(), limits)))
+			next.ServeHTTP(w, r.WithContext(limits.WithLimits(r.Context(), checked)))
 		})
 	}
 }

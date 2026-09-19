@@ -18,7 +18,6 @@ type manager struct {
 	repository    Repository
 	schemaManager SchemaManager
 	migrationMgr  MigrationManager
-	limitChecker  LimitChecker
 	logger        *zap.Logger
 
 	hooksMu sync.RWMutex
@@ -26,7 +25,7 @@ type manager struct {
 }
 
 // NewManager creates a new tenant manager
-func NewManager(config Config, db *sql.DB, repository Repository, schemaManager SchemaManager, migrationMgr MigrationManager, limitChecker LimitChecker, logger *zap.Logger) Manager {
+func NewManager(config Config, db *sql.DB, repository Repository, schemaManager SchemaManager, migrationMgr MigrationManager, logger *zap.Logger) Manager {
 	if config.Resolver.ValidateSubdomain == nil {
 		config.Resolver.ValidateSubdomain = DefaultSubdomainValidator(config.Resolver.ReservedSubdomain)
 	}
@@ -36,7 +35,6 @@ func NewManager(config Config, db *sql.DB, repository Repository, schemaManager 
 		repository:    repository,
 		schemaManager: schemaManager,
 		migrationMgr:  migrationMgr,
-		limitChecker:  limitChecker,
 		logger:        logger.Named("tenant_manager"),
 	}
 }
@@ -270,46 +268,9 @@ func (m *manager) ActivateTenant(ctx context.Context, id uuid.UUID) error {
 	return m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) })
 }
 
-// CheckLimits validates tenant against plan limits
-func (m *manager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits, error) {
-	tenant, err := m.repository.GetByID(ctx, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get tenant: %w", err)
-	}
-
-	// Get flexible plan limits
-	flexLimits := m.limitChecker.GetLimitsForPlan(tenant.Plan())
-	if flexLimits == nil {
-		return nil, fmt.Errorf("unknown plan type: %s", tenant.Plan())
-	}
-
-	// Check current usage against limits
-	if err := m.limitChecker.CheckAllLimits(ctx, tenantID); err != nil {
-		return nil, err
-	}
-
-	// Convert flexible limits to legacy format for backward compatibility
-	limits := &Limits{}
-	if maxUsers, err := flexLimits.GetInt("max_users"); err == nil {
-		limits.MaxUsers = maxUsers
-	}
-	if maxProjects, err := flexLimits.GetInt("max_projects"); err == nil {
-		limits.MaxProjects = maxProjects
-	}
-	if maxStorageGB, err := flexLimits.GetInt("max_storage_gb"); err == nil {
-		limits.MaxStorageGB = maxStorageGB
-	}
-
-	return limits, nil
-}
-
-// LimitChecker returns the limit checker used by CheckLimits.
-func (m *manager) LimitChecker() LimitChecker {
-	return m.limitChecker
-}
-
-// GetStats reports whether the schema exists, how many migrations are applied,
-// and the current usage for every limit listed in LimitsConfig.UsageTables.
+// GetStats reports whether the tenant's schema exists and how many
+// migrations are applied to it. Usage counts live in package limits
+// (Checker.Usage).
 func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error) {
 	if _, err := m.repository.GetByID(ctx, tenantID); err != nil {
 		return nil, fmt.Errorf("failed to get tenant: %w", err)
@@ -318,7 +279,7 @@ func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, err
 	if err != nil {
 		return nil, fmt.Errorf("failed to check schema: %w", err)
 	}
-	stats := &Stats{TenantID: tenantID, SchemaExists: exists, Usage: make(map[string]int)}
+	stats := &Stats{TenantID: tenantID, SchemaExists: exists}
 	if !exists {
 		return stats, nil
 	}
@@ -328,22 +289,6 @@ func (m *manager) GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, err
 		return nil, fmt.Errorf("failed to list applied migrations: %w", err)
 	}
 	stats.AppliedMigrations = len(applied)
-
-	tracker := m.limitChecker.GetUsageTracker()
-	if tracker == nil {
-		return stats, nil
-	}
-	for limitName := range m.config.Limits.UsageTables {
-		value, err := tracker.GetCurrentUsage(ctx, tenantID, limitName)
-		if err != nil {
-			m.logger.Warn("Failed to read usage",
-				zap.String("tenant_id", tenantID.String()), zap.String("limit", limitName), zap.Error(err))
-			continue
-		}
-		if n, ok := value.(int); ok {
-			stats.Usage[limitName] = n
-		}
-	}
 	return stats, nil
 }
 

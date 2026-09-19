@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
 )
@@ -66,7 +67,7 @@ func TestIntegration_FullTenantLifecycle(t *testing.T) {
 		Name:      "Integration Test Tenant",
 		Subdomain: "integration-test",
 	}
-	tenant.SetPlan(PlanBasic)
+	tenant.SetPlan(limits.PlanBasic)
 
 	err = mt.Manager.CreateTenant(ctx, tenant)
 	if err != nil {
@@ -151,13 +152,13 @@ func TestIntegration_FullTenantLifecycle(t *testing.T) {
 	}
 
 	// Test 11: Check limits
-	limits, err := mt.Manager.CheckLimits(ctx, tenantID)
+	planLimits, err := mt.Limits.CheckTenant(ctx, tenantID)
 	if err != nil {
-		t.Fatalf("CheckLimits failed: %v", err)
+		t.Fatalf("CheckTenant failed: %v", err)
 	}
 
-	if limits == nil {
-		t.Error("CheckLimits should return limits")
+	if planLimits == nil {
+		t.Error("CheckTenant should return the plan's limits")
 	}
 
 	// Test 12: Update tenant

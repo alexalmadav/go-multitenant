@@ -23,11 +23,7 @@ type Manager interface {
 	SuspendTenant(ctx context.Context, id uuid.UUID) error
 	ActivateTenant(ctx context.Context, id uuid.UUID) error
 
-	// Access and validation
-	CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits, error)
-	// LimitChecker exposes the limit checker so applications can add or
-	// adjust limits at runtime and swap the usage tracker.
-	LimitChecker() LimitChecker
+	// Stats reports schema and migration state for a tenant.
 	GetStats(ctx context.Context, tenantID uuid.UUID) (*Stats, error)
 
 	// RegisterHook adds a lifecycle hook. Hooks run in registration order.
@@ -91,8 +87,6 @@ type MigrationManager interface {
 	GetAppliedMigrations(ctx context.Context, tenantID uuid.UUID) ([]*Migration, error)
 	IsMigrationApplied(ctx context.Context, tenantID uuid.UUID, version string) (bool, error)
 }
-
-// Note: LimitChecker interface is now defined in limit_checker.go with flexible limits support
 
 // Storage handles tenant-aware file storage
 type Storage interface {

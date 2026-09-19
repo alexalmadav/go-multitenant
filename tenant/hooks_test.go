@@ -48,7 +48,7 @@ func (h *recordingHook) OnTenantDeleted(ctx context.Context, t *Tenant) error {
 func hookedManager(t *testing.T, hooks ...Hook) (Manager, *MockManagerRepository) {
 	t.Helper()
 	repo, schema, mig := newManagerMocks()
-	m := NewManager(DefaultConfig(), nil, repo, schema, mig, &MockManagerLimitChecker{}, zap.NewNop())
+	m := NewManager(DefaultConfig(), nil, repo, schema, mig, zap.NewNop())
 	for _, h := range hooks {
 		m.RegisterHook(h)
 	}

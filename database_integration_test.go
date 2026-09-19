@@ -16,6 +16,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/database"
 	dbpostgres "github.com/alexalmadav/go-multitenant/database/postgres"
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
@@ -160,14 +161,16 @@ var fixtureMigrationsDir = filepath.Join("testdata", "migrations")
 // testConfig returns the config integration tests use: the given DSN, the
 // fixture migrations directory, and usage tracking mapped to the two fixture
 // tables (projects, tenant_users).
-func testConfig(dsn string) tenant.Config {
-	config := tenant.DefaultConfig()
+func testConfig(dsn string) Config {
+	config := DefaultConfig()
 	config.Database.DSN = dsn
 	config.Database.MigrationsDir = fixtureMigrationsDir
-	config.Limits.UsageTables = map[string]string{
+	l := limits.ExampleConfig()
+	l.UsageTables = map[string]string{
 		"max_projects": "projects",
 		"max_users":    "tenant_users",
 	}
+	config.Limits = &l
 	return config
 }
 
@@ -1623,7 +1626,7 @@ func migrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uuid.UU
 		// CreateTenant no longer defaults an unset plan to basic (that SaaS
 		// opinion moved out of the core); set it explicitly so downstream
 		// limit-enforcement tests can resolve plan limits.
-		tt.SetPlan(tenant.PlanBasic)
+		tt.SetPlan(limits.PlanBasic)
 		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
 			t.Fatalf("CreateTenant failed: %v", err)
 		}
@@ -1664,7 +1667,7 @@ func bareMigrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uui
 			Name:      fmt.Sprintf("Migration Tenant %d", i),
 			Subdomain: fmt.Sprintf("mig-%s", id.String()[:8]),
 		}
-		tt.SetPlan(tenant.PlanBasic)
+		tt.SetPlan(limits.PlanBasic)
 		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
 			t.Fatalf("CreateTenant failed: %v", err)
 		}
@@ -1885,9 +1888,9 @@ func TestDatabase_Limits_ProjectCountAboveBasicPlanIsRejected(t *testing.T) {
 		t.Fatalf("failed to seed projects: %v", err)
 	}
 
-	_, err = mt.Manager.CheckLimits(ctx, tenantID)
+	_, err = mt.Limits.CheckTenant(ctx, tenantID)
 	if err == nil {
-		t.Fatalf("expected CheckLimits to fail with 11 projects on the basic plan")
+		t.Fatalf("expected CheckTenant to fail with 11 projects on the basic plan")
 	}
 	var tenantErr *tenant.TenantError
 	if !errors.As(err, &tenantErr) || tenantErr.Code != "LIMIT_EXCEEDED" {
@@ -1914,7 +1917,7 @@ func TestDatabase_Limits_ProjectCountAtBasicPlanLimitIsAllowed(t *testing.T) {
 		t.Fatalf("failed to seed projects: %v", err)
 	}
 
-	if _, err := mt.Manager.CheckLimits(ctx, tenantID); err != nil {
+	if _, err := mt.Limits.CheckTenant(ctx, tenantID); err != nil {
 		t.Errorf("10 projects should be within the basic plan limit, got: %v", err)
 	}
 }
@@ -1925,16 +1928,16 @@ func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
 	mt, ids := migrationTestEnv(t, tdb, 1)
 	ctx := context.Background()
 
-	checker := mt.Manager.LimitChecker()
+	checker := mt.Limits
 	if checker == nil {
-		t.Fatalf("Manager.LimitChecker() returned nil")
+		t.Fatalf("MultiTenant.Limits is nil")
 	}
 	if checker.GetUsageTracker() == nil {
 		t.Fatalf("New() should wire a default usage tracker")
 	}
 
 	// Tighten the basic plan at runtime and verify it takes effect.
-	if err := checker.UpdateLimit(tenant.PlanBasic, "max_projects", 0); err != nil {
+	if err := checker.UpdateLimit(limits.PlanBasic, "max_projects", 0); err != nil {
 		t.Fatalf("UpdateLimit failed: %v", err)
 	}
 	err := mt.Manager.WithTenantTx(ctx, ids[0], func(tx *sql.Tx) error {
@@ -1944,7 +1947,7 @@ func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to seed project: %v", err)
 	}
-	if _, err := mt.Manager.CheckLimits(ctx, ids[0]); err == nil {
+	if _, err := mt.Limits.CheckTenant(ctx, ids[0]); err == nil {
 		t.Errorf("expected failure after lowering max_projects to 0")
 	}
 }
@@ -2424,7 +2427,7 @@ func TestDatabase_UsageTracker_CountsConfiguredTableAndSkipsOthers(t *testing.T)
 	ctx := context.Background()
 	seedProjects(t, mt, ids[0], 3)
 
-	tracker := mt.Manager.LimitChecker().GetUsageTracker()
+	tracker := mt.Limits.GetUsageTracker()
 	v, err := tracker.GetCurrentUsage(ctx, ids[0], "max_projects")
 	if err != nil || v != 3 {
 		t.Errorf("max_projects usage = %v, %v; want 3", v, err)
@@ -2435,7 +2438,7 @@ func TestDatabase_UsageTracker_CountsConfiguredTableAndSkipsOthers(t *testing.T)
 	}
 }
 
-func TestDatabase_GetStats_ReportsMigrationsAndUsage(t *testing.T) {
+func TestDatabase_GetStats_ReportsMigrations(t *testing.T) {
 	tdb := newTestDB(t)
 	defer tdb.close()
 	mt, ids := migrationTestEnv(t, tdb, 1)
@@ -2452,8 +2455,12 @@ func TestDatabase_GetStats_ReportsMigrationsAndUsage(t *testing.T) {
 	if stats.AppliedMigrations != 2 { // fixture has 001 and 002
 		t.Errorf("AppliedMigrations = %d, want 2", stats.AppliedMigrations)
 	}
-	if stats.Usage["max_projects"] != 2 || stats.Usage["max_users"] != 0 {
-		t.Errorf("Usage = %v, want max_projects=2 max_users=0", stats.Usage)
+	usage, err := mt.Limits.Usage(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	if usage["max_projects"] != 2 || usage["max_users"] != 0 {
+		t.Errorf("Usage = %v, want max_projects=2 max_users=0", usage)
 	}
 }
 

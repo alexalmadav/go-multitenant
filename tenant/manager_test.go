@@ -21,12 +21,11 @@ func TestNewManager(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
 	// Create database connection (mock)
 	var db *sql.DB // In real tests, you'd use a test database
 
-	manager := NewManager(config, db, mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, db, mockRepo, mockSchema, mockMigration, logger)
 	if manager == nil {
 		t.Error("NewManager() should not return nil")
 	}
@@ -39,9 +38,8 @@ func TestManager_CreateTenant(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	tests := []struct {
 		name    string
@@ -128,9 +126,8 @@ func TestManager_CreateTenant_PreservesID(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	tenantID := uuid.New()
 	tenant := &Tenant{
@@ -157,9 +154,8 @@ func TestManager_GetTenant(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -198,9 +194,8 @@ func TestManager_GetTenantBySubdomain(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -238,9 +233,8 @@ func TestManager_UpdateTenant(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -276,9 +270,8 @@ func TestManager_DeleteTenant(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -318,9 +311,8 @@ func TestManager_ListTenants(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create test tenants
 	for i := 0; i < 5; i++ {
@@ -415,7 +407,7 @@ func newManagerMocks() (*MockManagerRepository, *MockManagerSchemaManager, *Mock
 
 // newTestManager builds a manager wired to the given mocks.
 func newTestManager(repo *MockManagerRepository, schema *MockManagerSchemaManager, mig *MockManagerMigrationManager) Manager {
-	return NewManager(DefaultConfig(), nil, repo, schema, mig, &MockManagerLimitChecker{}, zap.NewNop())
+	return NewManager(DefaultConfig(), nil, repo, schema, mig, zap.NewNop())
 }
 
 func TestManager_SuspendTenant(t *testing.T) {
@@ -425,9 +417,8 @@ func TestManager_SuspendTenant(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -467,9 +458,8 @@ func TestManager_ActivateTenant(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -502,42 +492,6 @@ func TestManager_ActivateTenant(t *testing.T) {
 	}
 }
 
-func TestManager_CheckLimits(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	config := DefaultConfig()
-
-	mockRepo := NewMockRepository()
-	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
-	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
-
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
-
-	// Create a test tenant
-	tenantID := uuid.New()
-	tenant := &Tenant{
-		ID:        tenantID,
-		Name:      "Test Tenant",
-		Subdomain: "test-tenant",
-		Status:    StatusActive,
-	}
-	tenant.SetPlan(PlanBasic)
-
-	// Add to mock repository
-	mockRepo.tenants[tenantID] = tenant
-
-	// Test checking limits
-	limits, err := manager.CheckLimits(context.Background(), tenantID)
-	if err != nil {
-		t.Errorf("CheckLimits() error = %v, want nil", err)
-		return
-	}
-
-	if limits == nil {
-		t.Error("CheckLimits() should return limits")
-	}
-}
-
 func TestManager_GetStats(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := DefaultConfig()
@@ -545,9 +499,8 @@ func TestManager_GetStats(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	tenantID := uuid.New()
 	mockRepo.tenants[tenantID] = &Tenant{ID: tenantID, Name: "T", Subdomain: "get-stats-t"}
@@ -574,9 +527,6 @@ func TestManager_GetStats(t *testing.T) {
 	if stats.AppliedMigrations != 2 {
 		t.Errorf("GetStats() AppliedMigrations = %d, want 2", stats.AppliedMigrations)
 	}
-	if len(stats.Usage) != 0 {
-		t.Errorf("GetStats() Usage = %v, want empty (no usage tracker)", stats.Usage)
-	}
 }
 
 func TestManager_WithTenantContext(t *testing.T) {
@@ -586,9 +536,8 @@ func TestManager_WithTenantContext(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Create a test tenant
 	tenantID := uuid.New()
@@ -633,9 +582,8 @@ func TestManager_Close(t *testing.T) {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
+	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, logger)
 
 	// Test close
 	err := manager.Close()
@@ -874,83 +822,6 @@ func (m *MockManagerMigrationManager) IsMigrationApplied(ctx context.Context, te
 	return exists, nil
 }
 
-// NewMockLimitChecker creates a mock limit checker for testing
-func NewMockLimitChecker(config LimitsConfig) *MockManagerLimitChecker {
-	return &MockManagerLimitChecker{
-		config:     config,
-		planLimits: config.PlanLimits,
-	}
-}
-
-// MockManagerLimitChecker implements LimitChecker interface for testing
-type MockManagerLimitChecker struct {
-	config     LimitsConfig
-	planLimits map[string]FlexibleLimits
-}
-
-func (m *MockManagerLimitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName string, currentValue interface{}) error {
-	return nil // Mock always passes
-}
-
-func (m *MockManagerLimitChecker) CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUID, def *LimitDefinition, currentValue interface{}) error {
-	return nil
-}
-
-func (m *MockManagerLimitChecker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error {
-	return nil
-}
-
-func (m *MockManagerLimitChecker) GetLimitSchema() *LimitSchema {
-	return m.config.LimitSchema
-}
-
-func (m *MockManagerLimitChecker) SetLimitSchema(schema *LimitSchema) {
-	m.config.LimitSchema = schema
-}
-
-func (m *MockManagerLimitChecker) GetLimitsForPlan(planType string) FlexibleLimits {
-	return m.planLimits[planType]
-}
-
-func (m *MockManagerLimitChecker) SetLimitsForPlan(planType string, limits FlexibleLimits) {
-	m.planLimits[planType] = limits
-}
-
-func (m *MockManagerLimitChecker) AddLimit(planType, limitName string, limitType LimitType, value interface{}) error {
-	if m.planLimits[planType] == nil {
-		m.planLimits[planType] = make(FlexibleLimits)
-	}
-	m.planLimits[planType][limitName] = &LimitValue{Type: limitType, Value: value}
-	return nil
-}
-
-func (m *MockManagerLimitChecker) RemoveLimit(planType, limitName string) error {
-	if m.planLimits[planType] != nil {
-		delete(m.planLimits[planType], limitName)
-	}
-	return nil
-}
-
-func (m *MockManagerLimitChecker) UpdateLimit(planType, limitName string, value interface{}) error {
-	if m.planLimits[planType] == nil || m.planLimits[planType][limitName] == nil {
-		return &TenantError{Code: "LIMIT_NOT_FOUND", Message: "limit not found"}
-	}
-	m.planLimits[planType][limitName].Value = value
-	return nil
-}
-
-func (m *MockManagerLimitChecker) ValidateLimits(planType string, limits FlexibleLimits) error {
-	return nil
-}
-
-func (m *MockManagerLimitChecker) SetUsageTracker(tracker UsageTracker) {
-	// Mock implementation
-}
-
-func (m *MockManagerLimitChecker) GetUsageTracker() UsageTracker {
-	return nil
-}
-
 func TestManager_CreateTenantUsesConfiguredSubdomainValidator(t *testing.T) {
 	repo, schema, mig := newManagerMocks()
 	cfg := DefaultConfig()
@@ -960,7 +831,7 @@ func TestManager_CreateTenantUsesConfiguredSubdomainValidator(t *testing.T) {
 		}
 		return nil // permissive otherwise, even for 2-char names
 	}
-	m := NewManager(cfg, nil, repo, schema, mig, &MockManagerLimitChecker{}, zap.NewNop())
+	m := NewManager(cfg, nil, repo, schema, mig, zap.NewNop())
 	if err := m.CreateTenant(context.Background(), &Tenant{Name: "T", Subdomain: "ab"}); err != nil {
 		t.Errorf("custom validator should allow 'ab': %v", err)
 	}

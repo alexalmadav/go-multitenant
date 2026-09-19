@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -20,7 +21,6 @@ import (
 type stubManager struct {
 	tenant.Manager
 	tenants       map[uuid.UUID]*tenant.Tenant
-	checkLimits   func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error)
 	getTenantConn func(ctx context.Context, id uuid.UUID) (*tenant.Conn, error)
 }
 
@@ -31,8 +31,13 @@ func (s *stubManager) GetTenant(ctx context.Context, id uuid.UUID) (*tenant.Tena
 	return nil, errors.New("tenant not found")
 }
 
-func (s *stubManager) CheckLimits(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
-	return s.checkLimits(ctx, id)
+// stubEnforcer is a limits.Enforcer whose CheckTenant is supplied per test.
+type stubEnforcer struct {
+	check func(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error)
+}
+
+func (s stubEnforcer) CheckTenant(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error) {
+	return s.check(ctx, id)
 }
 
 func (s *stubManager) GetTenantConn(ctx context.Context, id uuid.UUID) (*tenant.Conn, error) {
@@ -84,15 +89,14 @@ func errorCode(body map[string]any) string {
 
 // --- EnforceLimits ---------------------------------------------------------
 
-func enforce(t *testing.T, check func(context.Context, uuid.UUID) (*tenant.Limits, error)) (int, map[string]any) {
+func enforce(t *testing.T, check func(context.Context, uuid.UUID) (limits.FlexibleLimits, error)) (int, map[string]any) {
 	t.Helper()
-	mw := New(&stubManager{checkLimits: check}, nil, zap.NewNop(), Config{})
-	h := Chain(okHandler(), withTenant(uuid.New(), tenant.StatusActive), mw.EnforceLimits())
+	h := Chain(okHandler(), withTenant(uuid.New(), tenant.StatusActive), EnforceLimits(stubEnforcer{check}, nil))
 	return serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil))
 }
 
 func TestEnforceLimits_LimitExceededReturns402(t *testing.T) {
-	status, body := enforce(t, func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
+	status, body := enforce(t, func(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error) {
 		return nil, fmt.Errorf("limit check failed for max_projects: %w", &tenant.TenantError{
 			TenantID: id, Code: "LIMIT_EXCEEDED", Message: "Limit exceeded for max_projects: current=11, limit=10"})
 	})
@@ -102,7 +106,7 @@ func TestEnforceLimits_LimitExceededReturns402(t *testing.T) {
 }
 
 func TestEnforceLimits_FeatureNotAllowedReturns402(t *testing.T) {
-	status, body := enforce(t, func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
+	status, body := enforce(t, func(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error) {
 		return nil, &tenant.TenantError{TenantID: id, Code: "FEATURE_NOT_ALLOWED", Message: "advanced_features is disabled"}
 	})
 	if status != http.StatusPaymentRequired || errorCode(body) != "PLAN_LIMIT_EXCEEDED" {
@@ -111,7 +115,7 @@ func TestEnforceLimits_FeatureNotAllowedReturns402(t *testing.T) {
 }
 
 func TestEnforceLimits_UnexpectedErrorReturns500(t *testing.T) {
-	status, body := enforce(t, func(context.Context, uuid.UUID) (*tenant.Limits, error) {
+	status, body := enforce(t, func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
 		return nil, errors.New("database is on fire")
 	})
 	if status != http.StatusInternalServerError || errorCode(body) != "LIMIT_CHECK_FAILED" {
@@ -120,28 +124,63 @@ func TestEnforceLimits_UnexpectedErrorReturns500(t *testing.T) {
 }
 
 func TestEnforceLimits_WithinLimitsPassesAndStoresLimits(t *testing.T) {
-	var seen *tenant.Limits
-	mw := New(&stubManager{checkLimits: func(context.Context, uuid.UUID) (*tenant.Limits, error) {
-		return &tenant.Limits{MaxProjects: 10}, nil
-	}}, nil, zap.NewNop(), Config{})
+	var seen limits.FlexibleLimits
+	allow := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return limits.FlexibleLimits{"max_projects": limits.IntLimit(10)}, nil
+	}}
 	h := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen, _ = tenant.PlanLimitsFromContext(r.Context())
+		seen, _ = limits.FromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
-	}), withTenant(uuid.New(), tenant.StatusActive), mw.EnforceLimits())
+	}), withTenant(uuid.New(), tenant.StatusActive), EnforceLimits(allow, nil))
 	status, _ := serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil))
 	if status != http.StatusOK {
 		t.Fatalf("status = %d", status)
 	}
-	if seen == nil || seen.MaxProjects != 10 {
-		t.Errorf("limits not stored in context: %v", seen)
+	if got, err := seen.GetInt("max_projects"); err != nil || got != 10 {
+		t.Errorf("limits not stored in context: %v (%v)", seen, err)
 	}
 }
 
 func TestEnforceLimits_MissingTenantContextReturns500(t *testing.T) {
-	mw := New(&stubManager{}, nil, zap.NewNop(), Config{})
-	status, body := serve(t, mw.EnforceLimits()(okHandler()), httptest.NewRequest(http.MethodGet, "/", nil))
+	deny := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		t.Error("CheckTenant must not run without a tenant context")
+		return nil, nil
+	}}
+	status, body := serve(t, EnforceLimits(deny, nil)(okHandler()), httptest.NewRequest(http.MethodGet, "/", nil))
 	if status != http.StatusInternalServerError || errorCode(body) != "TENANT_CONTEXT_MISSING" {
 		t.Errorf("got %d %v, want 500 TENANT_CONTEXT_MISSING", status, body)
+	}
+}
+
+func TestEnforceLimits_NilEnforcerPassesThrough(t *testing.T) {
+	h := Chain(okHandler(), withTenant(uuid.New(), tenant.StatusActive), EnforceLimits(nil, nil))
+	if status, _ := serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil)); status != http.StatusOK {
+		t.Errorf("status = %d", status)
+	}
+}
+
+func TestStandard_WithoutLimitsOptionSkipsEnforcement(t *testing.T) {
+	id := uuid.New()
+	mgr := &stubManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}
+	mw := New(mgr, resolveTo(id), zap.NewNop(), Config{}) // no WithLimits
+	// Standard's chain minus SetTenantDB, which the stub manager has no
+	// database for; the point here is that EnforceLimits passes through.
+	h := Chain(okHandler(), mw.ResolveTenant(), mw.ValidateTenant(), mw.EnforceLimits())
+	if status, _ := serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil)); status != http.StatusOK {
+		t.Errorf("status = %d", status)
+	}
+}
+
+func TestStandard_WithLimitsOptionEnforces(t *testing.T) {
+	id := uuid.New()
+	mgr := &stubManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}
+	deny := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return nil, &tenant.TenantError{TenantID: id, Code: "LIMIT_EXCEEDED", Message: "over"}
+	}}
+	mw := New(mgr, resolveTo(id), zap.NewNop(), Config{}, WithLimits(deny))
+	status, body := serve(t, mw.Standard()(okHandler()), httptest.NewRequest(http.MethodGet, "/", nil))
+	if status != http.StatusPaymentRequired || errorCode(body) != "PLAN_LIMIT_EXCEEDED" {
+		t.Errorf("got %d %v", status, body)
 	}
 }
 
@@ -337,7 +376,14 @@ func TestStandard_SkipPathReachesHandler(t *testing.T) {
 	res := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
 		return uuid.Nil, errors.New("nope")
 	}}
-	mw := New(&stubManager{}, res, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+	// A limits enforcer is configured so the skip guard in EnforceLimits is
+	// load-bearing: without it the skipped request would fail on the missing
+	// tenant context.
+	never := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		t.Error("EnforceLimits must not run on a skipped path")
+		return nil, nil
+	}}
+	mw := New(&stubManager{}, res, zap.NewNop(), Config{SkipPaths: []string{"/health"}}, WithLimits(never))
 	var sawTenant bool
 	h := mw.Standard()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, sawTenant = tenant.GetTenantFromContext(r.Context())
@@ -355,10 +401,12 @@ func TestStandard_SkipPathReachesHandler(t *testing.T) {
 func TestStandard_ResolvesValidatesAndEnforces(t *testing.T) {
 	id := uuid.New()
 	mgr := &stubManager{
-		tenants:     map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusSuspended}},
-		checkLimits: func(context.Context, uuid.UUID) (*tenant.Limits, error) { return &tenant.Limits{}, nil },
+		tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusSuspended}},
 	}
-	mw := New(mgr, resolveTo(id), zap.NewNop(), Config{})
+	allow := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return limits.FlexibleLimits{}, nil
+	}}
+	mw := New(mgr, resolveTo(id), zap.NewNop(), Config{}, WithLimits(allow))
 	code, body := serve(t, mw.Standard()(okHandler()), httptest.NewRequest(http.MethodGet, "/", nil))
 	if code != http.StatusForbidden || errorCode(body) != "TENANT_SUSPENDED" {
 		t.Errorf("Standard should have run ValidateTenant: got %d %v", code, body)

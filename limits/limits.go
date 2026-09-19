@@ -1,4 +1,4 @@
-package tenant
+package limits
 
 import (
 	"context"
@@ -317,23 +317,6 @@ func (ls *LimitSchema) CreateDefaultLimits() FlexibleLimits {
 	}
 
 	return limits
-}
-
-// FlexibleLimitChecker extends the LimitChecker interface for dynamic limits
-type FlexibleLimitChecker interface {
-	LimitChecker // Embed existing interface for backward compatibility
-
-	// Dynamic limit checking
-	CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName string, currentValue interface{}) error
-	CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUID, def *LimitDefinition, currentValue interface{}) error
-
-	// Schema management
-	GetLimitSchema() *LimitSchema
-	SetLimitSchema(schema *LimitSchema)
-
-	// Flexible limits for plans
-	GetFlexibleLimitsForPlan(planType string) FlexibleLimits
-	SetFlexibleLimitsForPlan(planType string, limits FlexibleLimits)
 }
 
 // UsageTracker helps track current usage against limits

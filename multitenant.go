@@ -10,6 +10,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/database/postgres"
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/jackc/pgx/v5"
@@ -17,18 +18,34 @@ import (
 	"go.uber.org/zap"
 )
 
+// Config configures New. Embed tenant.Config for the core and set Limits to
+// enable plan-limit enforcement; nil Limits means no limits are checked.
+type Config struct {
+	tenant.Config
+	Limits *limits.Config
+}
+
+// DefaultConfig returns the core defaults and no limits.
+func DefaultConfig() Config {
+	return Config{Config: tenant.DefaultConfig()}
+}
+
 // MultiTenant is the main struct that provides all multi-tenant functionality
 type MultiTenant struct {
 	Manager        tenant.Manager
 	Resolver       tenant.Resolver
 	Migrations     tenant.MigrationManager
 	HTTPMiddleware *httpmw.Middleware
-	db             *sql.DB
-	logger         *zap.Logger
+	// Limits is the limit checker built from Config.Limits, or nil when no
+	// limits were configured. Use it to check limits, read usage, and adjust
+	// plans at runtime.
+	Limits limits.Checker
+	db     *sql.DB
+	logger *zap.Logger
 }
 
 // New creates a new MultiTenant instance with the provided configuration
-func New(config tenant.Config) (*MultiTenant, error) {
+func New(config Config) (*MultiTenant, error) {
 	// Setup logger
 	logger, err := setupLogger(config.Logger)
 	if err != nil {
@@ -69,34 +86,40 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Note: Applications should specify their own migrations directory path
 	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir, schemaManager, repository)
 
-	// Create limit checker with a usage tracker that counts rows in the tables
-	// named by config.Limits.UsageTables. Applications can replace it via
-	// Manager.LimitChecker().SetUsageTracker.
-	limitChecker := tenant.NewLimitChecker(config.Limits, repository, logger)
-	usageTracker, err := postgres.NewUsageTracker(db, schemaManager, config.Limits.UsageTables, logger)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to configure usage tracker: %w", err)
-	}
-	limitChecker.SetUsageTracker(usageTracker)
-
 	// Create tenant manager
-	manager := tenant.NewManager(config, db, repository, schemaManager, migrationMgr, limitChecker, logger)
+	manager := tenant.NewManager(config.Config, db, repository, schemaManager, migrationMgr, logger)
 
 	// Create resolver
 	resolver := tenant.NewResolver(config.Resolver, repository, logger)
+
+	// Limits are optional. When configured, the checker gets a usage tracker
+	// that counts rows in the tables named by config.Limits.UsageTables;
+	// applications can replace it with Limits.SetUsageTracker.
+	var checker limits.Checker
+	var mwOpts []httpmw.Option
+	if config.Limits != nil {
+		checker = limits.NewChecker(*config.Limits, repository, logger)
+		tracker, err := postgres.NewUsageTracker(db, schemaManager, config.Limits.UsageTables, logger)
+		if err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to configure usage tracker: %w", err)
+		}
+		checker.SetUsageTracker(tracker)
+		mwOpts = append(mwOpts, httpmw.WithLimits(checker))
+	}
 
 	// Framework-neutral middleware. Gin users wrap it with the adapter in
 	// github.com/alexalmadav/go-multitenant/middleware/gin.
 	httpMw := httpmw.New(manager, resolver, logger, httpmw.Config{
 		SkipPaths: []string{"/health", "/metrics", "/api/public/"},
-	})
+	}, mwOpts...)
 
 	return &MultiTenant{
 		Manager:        manager,
 		Resolver:       resolver,
 		Migrations:     migrationMgr,
 		HTTPMiddleware: httpMw,
+		Limits:         checker,
 		db:             db,
 		logger:         logger,
 	}, nil
@@ -195,10 +218,8 @@ func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
 type (
 	Tenant         = tenant.Tenant
 	Context        = tenant.Context
-	Config         = tenant.Config
 	Manager        = tenant.Manager
 	Resolver       = tenant.Resolver
-	Limits         = tenant.Limits
 	Stats          = tenant.Stats
 	Migration      = tenant.Migration
 	TenantMetadata = tenant.TenantMetadata
@@ -218,10 +239,6 @@ const (
 	StatusPending   = tenant.StatusPending
 	StatusCancelled = tenant.StatusCancelled
 
-	PlanBasic      = tenant.PlanBasic
-	PlanPro        = tenant.PlanPro
-	PlanEnterprise = tenant.PlanEnterprise
-
 	ResolverSubdomain = tenant.ResolverSubdomain
 	ResolverPath      = tenant.ResolverPath
 	ResolverHeader    = tenant.ResolverHeader
@@ -229,7 +246,6 @@ const (
 
 // Re-export helper functions
 var (
-	DefaultConfig          = tenant.DefaultConfig
 	GetTenantFromContext   = tenant.GetTenantFromContext
 	GetTenantIDFromContext = tenant.GetTenantIDFromContext
 	NewStripeExtension     = tenant.NewStripeExtension

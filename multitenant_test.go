@@ -16,13 +16,15 @@ import (
 func TestNew_InvalidConfig(t *testing.T) {
 	tests := []struct {
 		name   string
-		config tenant.Config
+		config Config
 	}{
 		{
 			name: "invalid database DSN",
-			config: tenant.Config{
-				Database: tenant.DatabaseConfig{
-					DSN: "invalid-dsn",
+			config: Config{
+				Config: tenant.Config{
+					Database: tenant.DatabaseConfig{
+						DSN: "invalid-dsn",
+					},
 				},
 			},
 		},
@@ -158,7 +160,6 @@ func TestReExportedTypes(t *testing.T) {
 	var tenant Tenant
 	var context Context
 	var config Config
-	var limits Limits
 	var stats Stats
 	var migration Migration
 
@@ -166,7 +167,6 @@ func TestReExportedTypes(t *testing.T) {
 	_ = tenant
 	_ = context
 	_ = config
-	_ = limits
 	_ = stats
 	_ = migration
 }
@@ -184,17 +184,6 @@ func TestReExportedConstants(t *testing.T) {
 	}
 	if StatusCancelled != "cancelled" {
 		t.Errorf("StatusCancelled = %v, want cancelled", StatusCancelled)
-	}
-
-	// Test plan constants
-	if PlanBasic != "basic" {
-		t.Errorf("PlanBasic = %v, want basic", PlanBasic)
-	}
-	if PlanPro != "pro" {
-		t.Errorf("PlanPro = %v, want pro", PlanPro)
-	}
-	if PlanEnterprise != "enterprise" {
-		t.Errorf("PlanEnterprise = %v, want enterprise", PlanEnterprise)
 	}
 
 	// Test resolver constants
@@ -308,20 +297,12 @@ func (m *MockMultiTenantManager) ActivateTenant(ctx context.Context, id uuid.UUI
 	return nil
 }
 
-func (m *MockMultiTenantManager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*tenant.Limits, error) {
-	return &tenant.Limits{}, nil
-}
-
 func (m *MockMultiTenantManager) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.Stats, error) {
 	return &tenant.Stats{}, nil
 }
 
 func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*tenant.Conn, error) {
 	return nil, nil
-}
-
-func (m *MockMultiTenantManager) LimitChecker() tenant.LimitChecker {
-	return nil
 }
 
 func (m *MockMultiTenantManager) WithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(tx *sql.Tx) error) error {
@@ -375,7 +356,7 @@ func TestReExportedErrorTypes(t *testing.T) {
 }
 
 func TestNew_RejectsMissingMigrationsDir(t *testing.T) {
-	config := tenant.DefaultConfig()
+	config := DefaultConfig()
 	config.Database.DSN = "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
 	config.Database.MigrationsDir = filepath.Join(t.TempDir(), "does-not-exist")
 

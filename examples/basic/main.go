@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/alexalmadav/go-multitenant"
+	"github.com/alexalmadav/go-multitenant/limits"
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -57,10 +58,10 @@ func main() {
 	// Multi-tenant API routes
 	api := r.Group("/api")
 	{
-		// Apply multi-tenant middleware
+		// Apply multi-tenant middleware. This example configures no limits
+		// (see with-billing for that), so EnforceLimits is left out.
 		api.Use(ginMw.ResolveTenant())
 		api.Use(ginMw.ValidateTenant())
-		api.Use(ginMw.EnforceLimits())
 		api.Use(ginMw.SetTenantDB())
 		api.Use(ginMw.LogAccess())
 
@@ -106,8 +107,8 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 			Status:    multitenant.StatusActive,
 		},
 	}
-	tenants[0].SetPlan(multitenant.PlanPro)
-	tenants[1].SetPlan(multitenant.PlanBasic)
+	tenants[0].SetPlan(limits.PlanPro)
+	tenants[1].SetPlan(limits.PlanBasic)
 
 	for _, tenant := range tenants {
 		// Check if tenant already exists
@@ -244,7 +245,7 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		if req.Plan == "" {
-			req.Plan = multitenant.PlanBasic
+			req.Plan = limits.PlanBasic
 		}
 
 		tenant := &multitenant.Tenant{
