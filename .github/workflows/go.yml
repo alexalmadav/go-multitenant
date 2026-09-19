@@ -19,6 +19,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: gofmt
+        if: matrix.module == '.'
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - name: Build
         working-directory: ${{ matrix.module }}

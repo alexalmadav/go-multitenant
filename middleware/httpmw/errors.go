@@ -40,7 +40,7 @@ func statusForCode(code string) int {
 	switch code {
 	case "TENANT_NOT_FOUND":
 		return http.StatusNotFound
-	case "TENANT_SUSPENDED", "TENANT_CANCELLED", "TENANT_PENDING", "TENANT_INVALID_STATUS", "ACCESS_DENIED":
+	case "TENANT_SUSPENDED", "TENANT_CANCELLED", "TENANT_PENDING", "TENANT_INVALID_STATUS":
 		return http.StatusForbidden
 	case "PLAN_LIMIT_EXCEEDED":
 		return http.StatusPaymentRequired

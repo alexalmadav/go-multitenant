@@ -12,6 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type stubManager struct {
@@ -125,6 +127,47 @@ func TestAdapter_SkipPathsPassThrough(t *testing.T) {
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusOK {
 		t.Errorf("code = %d", rec.Code)
+	}
+}
+
+func TestAdapter_StandardChainSkipPathReachesHandler(t *testing.T) {
+	mw := NewMiddleware(&stubManager{}, &stubResolver{err: errors.New("nope")}, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+	reached := false
+	r := newRouter(mw, mw.ResolveTenant(), mw.ValidateTenant(), mw.EnforceLimits(), mw.SetTenantDB(), mw.LogAccess())
+	r.GET("/health", func(c *gin.Context) {
+		reached = true
+		c.Status(http.StatusOK)
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK || !reached {
+		t.Errorf("code = %d reached = %v, want 200 true", rec.Code, reached)
+	}
+}
+
+func TestAdapter_LogAccessReadsGinUserIDKey(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	id := uuid.New()
+	mw := NewMiddleware(&stubManager{}, &stubResolver{}, zap.New(core), Config{})
+	setTenantAndUser := func(c *gin.Context) {
+		ctx := context.WithValue(c.Request.Context(), tenant.ContextKeyTenant, &tenant.Context{TenantID: id, Status: tenant.StatusActive})
+		c.Request = c.Request.WithContext(ctx)
+		c.Set("user_id", "user-9")
+		c.Next()
+	}
+	r := newRouter(mw, setTenantAndUser, mw.LogAccess())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	entries := logs.FilterMessage("Tenant access").All()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	if got := entries[0].ContextMap()["user_id"]; got != "user-9" {
+		t.Errorf("user_id = %v, want user-9", got)
 	}
 }
 

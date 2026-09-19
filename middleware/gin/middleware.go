@@ -25,6 +25,11 @@ type Config struct {
 	// It must write a response; the chain is aborted afterwards. Defaults to
 	// the JSON handler from package httpmw.
 	ErrorHandler func(*gin.Context, error)
+	// ClientIP extracts the client address for the access log. Default: the
+	// host part of r.RemoteAddr, which cannot be spoofed by the client. Behind
+	// a trusted reverse proxy that sets X-Forwarded-For, use
+	// httpmw.ForwardedClientIP.
+	ClientIP func(*http.Request) string
 }
 
 // Middleware provides Gin handlers backed by httpmw.
@@ -32,11 +37,14 @@ type Middleware struct {
 	core *httpmw.Middleware
 }
 
+// ginContextKey is internal-only; the stored *gin.Context is read
+// synchronously by the error-handler bridge during the request and must
+// never be retained beyond it (Gin pools contexts).
 type ginContextKey struct{}
 
 // NewMiddleware creates the Gin middleware.
 func NewMiddleware(manager tenant.Manager, resolver tenant.Resolver, logger *zap.Logger, cfg Config) *Middleware {
-	coreCfg := httpmw.Config{SkipPaths: cfg.SkipPaths}
+	coreCfg := httpmw.Config{SkipPaths: cfg.SkipPaths, ClientIP: cfg.ClientIP}
 	if cfg.ErrorHandler != nil {
 		coreCfg.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			if c, ok := r.Context().Value(ginContextKey{}).(*gin.Context); ok {
@@ -55,7 +63,13 @@ func NewMiddleware(manager tenant.Manager, resolver tenant.Resolver, logger *zap
 func (m *Middleware) adapt(mw func(http.Handler) http.Handler) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		reached := false
-		req := c.Request.WithContext(context.WithValue(c.Request.Context(), ginContextKey{}, c))
+		ctx := context.WithValue(c.Request.Context(), ginContextKey{}, c)
+		if _, ok := tenant.UserIDFromContext(ctx); !ok {
+			if uid := c.GetString("user_id"); uid != "" {
+				ctx = tenant.WithUserID(ctx, uid)
+			}
+		}
+		req := c.Request.WithContext(ctx)
 		h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			reached = true
 			c.Request = r

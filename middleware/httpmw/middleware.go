@@ -23,6 +23,10 @@ type Config struct {
 	// ErrorHandler writes the response for a tenant error. Defaults to
 	// DefaultErrorHandler.
 	ErrorHandler func(w http.ResponseWriter, r *http.Request, err error)
+	// ClientIP extracts the client address for the access log. Default: the
+	// host part of r.RemoteAddr, which cannot be spoofed by the client. Behind
+	// a trusted reverse proxy that sets X-Forwarded-For, use ForwardedClientIP.
+	ClientIP func(*http.Request) string
 }
 
 // Middleware builds tenant middlewares for net/http.
@@ -37,6 +41,9 @@ type Middleware struct {
 func New(manager tenant.Manager, resolver tenant.Resolver, logger *zap.Logger, cfg Config) *Middleware {
 	if cfg.ErrorHandler == nil {
 		cfg.ErrorHandler = DefaultErrorHandler
+	}
+	if cfg.ClientIP == nil {
+		cfg.ClientIP = RemoteAddrIP
 	}
 	if logger == nil {
 		logger = zap.NewNop()
@@ -109,6 +116,11 @@ func (m *Middleware) ResolveTenant() func(http.Handler) http.Handler {
 func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if m.shouldSkipPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			tc, ok := tenant.GetTenantFromContext(r.Context())
 			if !ok {
 				m.config.ErrorHandler(w, r, &tenant.TenantError{
@@ -135,6 +147,11 @@ func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if m.shouldSkipPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			tc, ok := tenant.GetTenantFromContext(r.Context())
 			if !ok {
 				m.config.ErrorHandler(w, r, &tenant.TenantError{Code: "TENANT_CONTEXT_MISSING", Message: "Tenant context not found"})
@@ -195,7 +212,7 @@ func (m *Middleware) LogAccess() func(http.Handler) http.Handler {
 					zap.String("user_id", userID),
 					zap.String("tenant_id", tc.TenantID.String()),
 					zap.String("subdomain", tc.Subdomain),
-					zap.String("client_ip", clientIP(r)),
+					zap.String("client_ip", m.config.ClientIP(r)),
 					zap.String("user_agent", r.UserAgent()))
 			}
 			next.ServeHTTP(w, r)
@@ -212,17 +229,25 @@ func (m *Middleware) shouldSkipPath(path string) bool {
 	return false
 }
 
-// clientIP returns the first X-Forwarded-For entry, else X-Real-IP, else the
-// RemoteAddr host.
-func clientIP(r *http.Request) string {
+// ForwardedClientIP returns the first X-Forwarded-For entry, else X-Real-IP,
+// else the RemoteAddr host. Header values that do not parse as an IP are
+// ignored. Only use it behind a proxy you control that overwrites these
+// headers; otherwise clients can choose the logged address.
+func ForwardedClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
+		if first, _, _ := strings.Cut(xff, ","); net.ParseIP(strings.TrimSpace(first)) != nil {
 			return strings.TrimSpace(first)
 		}
 	}
-	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); xr != "" {
+	if xr := strings.TrimSpace(r.Header.Get("X-Real-IP")); net.ParseIP(xr) != nil {
 		return xr
 	}
+	return RemoteAddrIP(r)
+}
+
+// RemoteAddrIP returns the host part of r.RemoteAddr, or r.RemoteAddr
+// unchanged if it has no port.
+func RemoteAddrIP(r *http.Request) string {
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}

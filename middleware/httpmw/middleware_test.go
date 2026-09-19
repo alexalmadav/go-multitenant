@@ -19,8 +19,9 @@ import (
 // stubManager implements only what a test needs; other methods panic via the nil embedded interface.
 type stubManager struct {
 	tenant.Manager
-	tenants     map[uuid.UUID]*tenant.Tenant
-	checkLimits func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error)
+	tenants       map[uuid.UUID]*tenant.Tenant
+	checkLimits   func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error)
+	getTenantConn func(ctx context.Context, id uuid.UUID) (*tenant.Conn, error)
 }
 
 func (s *stubManager) GetTenant(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
@@ -32,6 +33,10 @@ func (s *stubManager) GetTenant(ctx context.Context, id uuid.UUID) (*tenant.Tena
 
 func (s *stubManager) CheckLimits(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
 	return s.checkLimits(ctx, id)
+}
+
+func (s *stubManager) GetTenantConn(ctx context.Context, id uuid.UUID) (*tenant.Conn, error) {
+	return s.getTenantConn(ctx, id)
 }
 
 type stubResolver struct {
@@ -264,7 +269,7 @@ func TestLogAccess_EmitsOneEntryWithFields(t *testing.T) {
 		t.Fatalf("entries = %d", len(entries))
 	}
 	f := entries[0].ContextMap()
-	want := map[string]string{"tenant_id": id.String(), "user_id": "user-1", "method": "POST", "path": "/projects", "client_ip": "203.0.113.9", "user_agent": "test-agent"}
+	want := map[string]string{"tenant_id": id.String(), "user_id": "user-1", "method": "POST", "path": "/projects", "client_ip": "192.0.2.1", "user_agent": "test-agent"}
 	for k, v := range want {
 		if f[k] != v {
 			t.Errorf("%s = %v, want %s", k, f[k], v)
@@ -298,6 +303,18 @@ func TestSetTenantDB_WithoutTenantPassesThrough(t *testing.T) {
 	}
 }
 
+func TestSetTenantDB_ConnErrorReturns500(t *testing.T) {
+	mgr := &stubManager{getTenantConn: func(context.Context, uuid.UUID) (*tenant.Conn, error) {
+		return nil, errors.New("connection refused")
+	}}
+	mw := New(mgr, nil, zap.NewNop(), Config{})
+	h := Chain(okHandler(), withTenant(uuid.New(), tenant.StatusActive), mw.SetTenantDB())
+	status, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil))
+	if status != http.StatusInternalServerError || errorCode(body) != "DATABASE_ERROR" {
+		t.Errorf("got %d %v, want 500 DATABASE_ERROR", status, body)
+	}
+}
+
 // --- Chain / Standard / errors / clientIP ---------------------------------
 
 func TestChain_AppliesInOrder(t *testing.T) {
@@ -313,6 +330,25 @@ func TestChain_AppliesInOrder(t *testing.T) {
 	serve(t, Chain(okHandler(), tag("a"), tag("b"), tag("c")), httptest.NewRequest(http.MethodGet, "/", nil))
 	if got := fmt.Sprint(order); got != "[a b c]" {
 		t.Errorf("order = %s", got)
+	}
+}
+
+func TestStandard_SkipPathReachesHandler(t *testing.T) {
+	res := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+		return uuid.Nil, errors.New("nope")
+	}}
+	mw := New(&stubManager{}, res, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+	var sawTenant bool
+	h := mw.Standard()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawTenant = tenant.GetTenantFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+	status, _ := serve(t, h, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if status != http.StatusOK {
+		t.Errorf("status = %d, want 200", status)
+	}
+	if sawTenant {
+		t.Error("no tenant expected on skipped path")
 	}
 }
 
@@ -355,15 +391,55 @@ func TestCustomErrorHandlerIsUsed(t *testing.T) {
 func TestClientIP_Precedence(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "192.0.2.1:1234"
-	if got := clientIP(r); got != "192.0.2.1" {
+	if got := ForwardedClientIP(r); got != "192.0.2.1" {
 		t.Errorf("RemoteAddr: %q", got)
 	}
 	r.Header.Set("X-Real-IP", "198.51.100.7")
-	if got := clientIP(r); got != "198.51.100.7" {
+	if got := ForwardedClientIP(r); got != "198.51.100.7" {
 		t.Errorf("X-Real-IP: %q", got)
 	}
 	r.Header.Set("X-Forwarded-For", " 203.0.113.9 , 10.0.0.1")
-	if got := clientIP(r); got != "203.0.113.9" {
+	if got := ForwardedClientIP(r); got != "203.0.113.9" {
 		t.Errorf("X-Forwarded-For: %q", got)
+	}
+	r.Header.Set("X-Forwarded-For", "evil<script>")
+	if got := ForwardedClientIP(r); got != "198.51.100.7" {
+		t.Errorf("non-IP X-Forwarded-For should fall through to X-Real-IP: %q", got)
+	}
+}
+
+func TestLogAccess_DefaultClientIPIsRemoteAddr(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	id := uuid.New()
+	mw := New(&stubManager{}, nil, zap.New(core), Config{})
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), mw.LogAccess())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	serve(t, h, req)
+	entries := logs.FilterMessage("Tenant access").All()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	if got := entries[0].ContextMap()["client_ip"]; got != "192.0.2.1" {
+		t.Errorf("client_ip = %v, want 192.0.2.1", got)
+	}
+}
+
+func TestLogAccess_ForwardedClientIPOptIn(t *testing.T) {
+	core, logs := observer.New(zapcore.InfoLevel)
+	id := uuid.New()
+	mw := New(&stubManager{}, nil, zap.New(core), Config{ClientIP: ForwardedClientIP})
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), mw.LogAccess())
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	serve(t, h, req)
+	entries := logs.FilterMessage("Tenant access").All()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	if got := entries[0].ContextMap()["client_ip"]; got != "203.0.113.9" {
+		t.Errorf("client_ip = %v, want 203.0.113.9", got)
 	}
 }

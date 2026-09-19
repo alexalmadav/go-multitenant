@@ -20,5 +20,8 @@ Release vX.Y.Z:
    `curl https://proxy.golang.org/github.com/alexalmadav/go-multitenant/@v/vX.Y.Z.info`
    `curl https://proxy.golang.org/github.com/alexalmadav/go-multitenant/middleware/gin/@v/vX.Y.Z.info`
 
-Between step 2 and step 4 the adapter module is only buildable inside this
-repository; that window is expected.
+The window during which the adapter module is only buildable inside this
+repository opens when the PR-A middleware change merges to `master` (from
+that point the adapter module requires a core version without `httpmw`,
+which isn't published yet) and closes when the adapter is tagged in step 4;
+that window is expected.

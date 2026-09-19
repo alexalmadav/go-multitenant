@@ -263,6 +263,11 @@ api.Use(ginMw.SetTenantDB())               // Set database context
 api.Use(ginMw.LogAccess())                 // Log access
 ```
 
+Setting `c.Set("user_id", id)` from a Gin auth middleware still feeds the
+access log — the adapter bridges it onto the request context automatically.
+`tenant.WithUserID` on the request context is the framework-neutral way and
+takes precedence if both are set.
+
 ## 🗄️ Database Operations
 
 ### Tenant-Aware Database Operations
@@ -596,19 +601,33 @@ v0.8.0 (part 1) replaces the Gin-only middleware with a framework-neutral
   now entirely the application's responsibility: put your own auth middleware
   ahead of the tenant middleware in the chain, and call `tenant.WithUserID` on
   the request context from it if you want the user id to appear in
-  `LogAccess`'s output.
+  `LogAccess`'s output. Note that `multitenant.New` previously constructed
+  the Gin middleware with `RequireAuthentication: true`; after upgrading,
+  requests that used to be rejected for a missing `user_id` reach your
+  handlers until you add your own auth middleware.
+- **The `tenant.Middleware` interface lost `RequireAdmin()`.** Any code that
+  called it through the interface (rather than the concrete Gin type) no
+  longer compiles; remove the call and enforce admin access in your own
+  middleware.
+- **`TENANT_INVALID_STATUS` now returns 403** (it returned 500 before). If
+  you match on status codes rather than the `error.code` field, update that
+  check.
 - **The access log's logger name changed** from `gin_middleware` to
   `http_middleware` for both the `net/http` core and the Gin adapter (the Gin
   adapter is built on top of the core middleware, so it now shares the
   core's logger name). If you filter or route logs by logger name, update
   that filter.
-- **`client_ip` in the access log no longer depends on Gin's trusted-proxy
-  settings.** It is now always the first entry of `X-Forwarded-For`, falling
-  back to `X-Real-IP`, then `RemoteAddr`, regardless of
-  `gin.Engine.SetTrustedProxies`. If you relied on `SetTrustedProxies` to
-  prevent client IP spoofing via `X-Forwarded-For`, you must now strip or
-  overwrite that header (and `X-Real-IP`) at your edge (load balancer or
-  reverse proxy) before requests reach the application.
+- **`client_ip` in the access log now defaults to the host part of
+  `r.RemoteAddr`**, which the client cannot spoof, instead of trusting
+  `X-Forwarded-For`/`X-Real-IP` unconditionally. If you are behind a
+  reverse proxy you control that sets `X-Forwarded-For`, opt back in with
+  `Config{ClientIP: httpmw.ForwardedClientIP}` (or, for the Gin adapter,
+  `ginmiddleware.Config{ClientIP: httpmw.ForwardedClientIP}`); make sure
+  that proxy strips or overwrites inbound `X-Forwarded-For`/`X-Real-IP`
+  headers before requests reach it, or clients can still choose the logged
+  address.
+- **Non-breaking:** `ResolveTenant` no longer fetches the tenant twice per
+  request.
 
 ## ⬆️ Upgrading from v0.6
 
