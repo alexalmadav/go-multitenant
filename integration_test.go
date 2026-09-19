@@ -65,8 +65,8 @@ func TestIntegration_FullTenantLifecycle(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Integration Test Tenant",
 		Subdomain: "integration-test",
-		PlanType:  tenant.PlanBasic,
 	}
+	tenant.SetPlan(PlanBasic)
 
 	err = mt.Manager.CreateTenant(ctx, tenant)
 	if err != nil {
@@ -217,7 +217,6 @@ func TestIntegration_TenantResolver(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Resolver Test Tenant",
 		Subdomain: "resolver-test",
-		PlanType:  tenant.PlanBasic,
 	}
 
 	err = mt.Manager.CreateTenant(ctx, testTenant)
@@ -299,7 +298,6 @@ func TestIntegration_ConcurrentTenantOperations(t *testing.T) {
 				ID:        tenantID,
 				Name:      fmt.Sprintf("Concurrent Test Tenant %d", index),
 				Subdomain: fmt.Sprintf("concurrent-test-%d", index),
-				PlanType:  tenant.PlanBasic,
 			}
 
 			err := mt.Manager.CreateTenant(ctx, tenant)
@@ -377,14 +375,12 @@ func TestIntegration_TenantSchemaIsolation(t *testing.T) {
 		ID:        tenant1ID,
 		Name:      "Schema Test Tenant 1",
 		Subdomain: "schema-test-1",
-		PlanType:  tenant.PlanBasic,
 	}
 
 	tenant2 := &tenant.Tenant{
 		ID:        tenant2ID,
 		Name:      "Schema Test Tenant 2",
 		Subdomain: "schema-test-2",
-		PlanType:  tenant.PlanBasic,
 	}
 
 	// Create and provision both tenants

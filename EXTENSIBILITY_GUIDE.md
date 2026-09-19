@@ -56,9 +56,9 @@ tenant := &multitenant.Tenant{
     ID:        uuid.New(),
     Name:      "Acme Corporation",
     Subdomain: "acme",
-    PlanType:  multitenant.PlanPro,
     Status:    multitenant.StatusPending,
 }
+tenant.SetPlan("pro")
 err := mt.Manager.CreateTenant(ctx, tenant)
 err = mt.Manager.ProvisionTenant(ctx, tenant.ID)
 ```

@@ -30,28 +30,6 @@ func TestValidateStatus(t *testing.T) {
 	}
 }
 
-func TestValidatePlanType(t *testing.T) {
-	tests := []struct {
-		name     string
-		planType string
-		want     bool
-	}{
-		{"valid basic", PlanBasic, true},
-		{"valid pro", PlanPro, true},
-		{"valid enterprise", PlanEnterprise, true},
-		{"invalid plan", "invalid", false},
-		{"empty plan", "", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ValidatePlanType(tt.planType); got != tt.want {
-				t.Errorf("ValidatePlanType() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestTenant_Validation(t *testing.T) {
 	now := time.Now()
 
@@ -66,7 +44,6 @@ func TestTenant_Validation(t *testing.T) {
 				ID:         uuid.New(),
 				Name:       "Test Tenant",
 				Subdomain:  "test-tenant",
-				PlanType:   PlanBasic,
 				Status:     StatusActive,
 				SchemaName: "tenant_123",
 				CreatedAt:  now,
@@ -80,7 +57,6 @@ func TestTenant_Validation(t *testing.T) {
 				ID:        uuid.New(),
 				Name:      "",
 				Subdomain: "test-tenant",
-				PlanType:  PlanBasic,
 				Status:    StatusActive,
 			},
 			valid: false,
@@ -88,21 +64,9 @@ func TestTenant_Validation(t *testing.T) {
 		{
 			name: "empty subdomain",
 			tenant: Tenant{
-				ID:       uuid.New(),
-				Name:     "Test Tenant",
-				PlanType: PlanBasic,
-				Status:   StatusActive,
-			},
-			valid: false,
-		},
-		{
-			name: "invalid plan type",
-			tenant: Tenant{
-				ID:        uuid.New(),
-				Name:      "Test Tenant",
-				Subdomain: "test-tenant",
-				PlanType:  "invalid",
-				Status:    StatusActive,
+				ID:     uuid.New(),
+				Name:   "Test Tenant",
+				Status: StatusActive,
 			},
 			valid: false,
 		},
@@ -112,7 +76,6 @@ func TestTenant_Validation(t *testing.T) {
 				ID:        uuid.New(),
 				Name:      "Test Tenant",
 				Subdomain: "test-tenant",
-				PlanType:  PlanBasic,
 				Status:    "invalid",
 			},
 			valid: false,
@@ -124,15 +87,14 @@ func TestTenant_Validation(t *testing.T) {
 			// Test individual field validations
 			nameValid := tt.tenant.Name != ""
 			subdomainValid := tt.tenant.Subdomain != ""
-			planValid := ValidatePlanType(tt.tenant.PlanType)
 			statusValid := ValidateStatus(tt.tenant.Status)
 
-			allValid := nameValid && subdomainValid && planValid && statusValid
+			allValid := nameValid && subdomainValid && statusValid
 
 			if allValid != tt.valid {
 				t.Errorf("Tenant validation = %v, want %v", allValid, tt.valid)
-				t.Errorf("Name valid: %v, Subdomain valid: %v, Plan valid: %v, Status valid: %v",
-					nameValid, subdomainValid, planValid, statusValid)
+				t.Errorf("Name valid: %v, Subdomain valid: %v, Status valid: %v",
+					nameValid, subdomainValid, statusValid)
 			}
 		})
 	}
@@ -170,7 +132,6 @@ func TestContext_Fields(t *testing.T) {
 		TenantID:   tenantID,
 		Subdomain:  "test-tenant",
 		SchemaName: "tenant_123",
-		PlanType:   PlanPro,
 		Status:     StatusActive,
 	}
 
@@ -182,9 +143,6 @@ func TestContext_Fields(t *testing.T) {
 	}
 	if ctx.SchemaName != "tenant_123" {
 		t.Errorf("Context.SchemaName = %v, want %v", ctx.SchemaName, "tenant_123")
-	}
-	if ctx.PlanType != PlanPro {
-		t.Errorf("Context.PlanType = %v, want %v", ctx.PlanType, PlanPro)
 	}
 	if ctx.Status != StatusActive {
 		t.Errorf("Context.Status = %v, want %v", ctx.Status, StatusActive)
@@ -278,9 +236,6 @@ func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
 
 	// Test database config
-	if config.Database.Driver != "pgx" {
-		t.Errorf("DefaultConfig.Database.Driver = %v, want %v", config.Database.Driver, "pgx")
-	}
 	if config.Database.MaxOpenConns != 100 {
 		t.Errorf("DefaultConfig.Database.MaxOpenConns = %v, want %v", config.Database.MaxOpenConns, 100)
 	}

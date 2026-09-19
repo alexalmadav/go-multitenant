@@ -46,13 +46,11 @@ func TestLimitChecker_CheckLimit(t *testing.T) {
 	}
 
 	tenantID := uuid.New()
+	basicTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	basicTenant.SetPlan(PlanBasic)
 	mockRepo := &MockLimitCheckerRepository{
 		tenants: map[uuid.UUID]*Tenant{
-			tenantID: {
-				ID:       tenantID,
-				PlanType: PlanBasic,
-				Status:   StatusActive,
-			},
+			tenantID: basicTenant,
 		},
 	}
 
@@ -145,13 +143,11 @@ func TestLimitChecker_CheckLimit_EnforcementDisabled(t *testing.T) {
 	}
 
 	tenantID := uuid.New()
+	basicTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	basicTenant.SetPlan(PlanBasic)
 	mockRepo := &MockLimitCheckerRepository{
 		tenants: map[uuid.UUID]*Tenant{
-			tenantID: {
-				ID:       tenantID,
-				PlanType: PlanBasic,
-				Status:   StatusActive,
-			},
+			tenantID: basicTenant,
 		},
 	}
 
@@ -181,13 +177,11 @@ func TestLimitChecker_CheckAllLimits(t *testing.T) {
 	}
 
 	tenantID := uuid.New()
+	basicTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	basicTenant.SetPlan(PlanBasic)
 	mockRepo := &MockLimitCheckerRepository{
 		tenants: map[uuid.UUID]*Tenant{
-			tenantID: {
-				ID:       tenantID,
-				PlanType: PlanBasic,
-				Status:   StatusActive,
-			},
+			tenantID: basicTenant,
 		},
 	}
 
@@ -609,8 +603,10 @@ func (m *MockUsageTracker) ResetUsage(ctx context.Context, tenantID uuid.UUID, l
 
 func TestLimitChecker_ConcurrentAddLimitAndCheckLimitIsRaceFree(t *testing.T) {
 	tenantID := uuid.New()
+	raceTenant := &Tenant{ID: tenantID, Status: StatusActive}
+	raceTenant.SetPlan(PlanBasic)
 	mockRepo := &MockLimitCheckerRepository{tenants: map[uuid.UUID]*Tenant{
-		tenantID: {ID: tenantID, PlanType: PlanBasic, Status: StatusActive},
+		tenantID: raceTenant,
 	}}
 	config := DefaultConfig().Limits
 	checker := NewLimitChecker(config, mockRepo, zaptest.NewLogger(t))

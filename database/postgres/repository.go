@@ -29,8 +29,8 @@ func NewRepository(db *sql.DB, logger *zap.Logger) *Repository {
 // Create creates a new tenant
 func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 	query := `
-		INSERT INTO public.tenants (id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO public.tenants (id, name, subdomain, status, schema_name, metadata, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
 
 	now := time.Now()
@@ -41,7 +41,6 @@ func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 		t.ID,
 		t.Name,
 		t.Subdomain,
-		t.PlanType,
 		t.Status,
 		t.SchemaName,
 		t.Metadata,
@@ -67,7 +66,7 @@ func (r *Repository) Create(ctx context.Context, t *tenant.Tenant) error {
 // GetByID retrieves a tenant by ID
 func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
 	query := `
-		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
+		SELECT id, name, subdomain, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE id = $1
 	`
@@ -77,7 +76,6 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant,
 		&t.ID,
 		&t.Name,
 		&t.Subdomain,
-		&t.PlanType,
 		&t.Status,
 		&t.SchemaName,
 		&t.Metadata,
@@ -101,7 +99,7 @@ func (r *Repository) GetByID(ctx context.Context, id uuid.UUID) (*tenant.Tenant,
 // GetBySubdomain retrieves a tenant by subdomain
 func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*tenant.Tenant, error) {
 	query := `
-		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
+		SELECT id, name, subdomain, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE subdomain = $1
 	`
@@ -111,7 +109,6 @@ func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*ten
 		&t.ID,
 		&t.Name,
 		&t.Subdomain,
-		&t.PlanType,
 		&t.Status,
 		&t.SchemaName,
 		&t.Metadata,
@@ -136,7 +133,7 @@ func (r *Repository) GetBySubdomain(ctx context.Context, subdomain string) (*ten
 func (r *Repository) Update(ctx context.Context, t *tenant.Tenant) error {
 	query := `
 		UPDATE public.tenants
-		SET name = $2, subdomain = $3, plan_type = $4, status = $5, metadata = $6, updated_at = $7
+		SET name = $2, subdomain = $3, status = $4, metadata = $5, updated_at = $6
 		WHERE id = $1
 	`
 
@@ -146,7 +143,6 @@ func (r *Repository) Update(ctx context.Context, t *tenant.Tenant) error {
 		t.ID,
 		t.Name,
 		t.Subdomain,
-		t.PlanType,
 		t.Status,
 		t.Metadata,
 		t.UpdatedAt,
@@ -227,7 +223,7 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 
 	// Get tenants
 	query := `
-		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
+		SELECT id, name, subdomain, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE status != $1
 		ORDER BY created_at DESC
@@ -253,7 +249,7 @@ func (r *Repository) List(ctx context.Context, page, perPage int) ([]*tenant.Ten
 // FindByMetadata returns tenants whose metadata[key] equals value.
 func (r *Repository) FindByMetadata(ctx context.Context, key, value string) ([]*tenant.Tenant, error) {
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, subdomain, plan_type, status, schema_name, metadata, created_at, updated_at
+		SELECT id, name, subdomain, status, schema_name, metadata, created_at, updated_at
 		FROM public.tenants
 		WHERE metadata ->> $1 = $2
 		ORDER BY created_at`, key, value)
@@ -269,7 +265,7 @@ func scanTenants(rows *sql.Rows) ([]*tenant.Tenant, error) {
 	var tenants []*tenant.Tenant
 	for rows.Next() {
 		t := &tenant.Tenant{}
-		if err := rows.Scan(&t.ID, &t.Name, &t.Subdomain, &t.PlanType, &t.Status, &t.SchemaName, &t.Metadata, &t.CreatedAt, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Name, &t.Subdomain, &t.Status, &t.SchemaName, &t.Metadata, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan tenant: %w", err)
 		}
 		tenants = append(tenants, t)
@@ -284,13 +280,11 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 			id UUID PRIMARY KEY,
 			name VARCHAR(255) NOT NULL,
 			subdomain VARCHAR(255) UNIQUE NOT NULL,
-			plan_type VARCHAR(50) NOT NULL DEFAULT 'basic',
 			status VARCHAR(50) NOT NULL DEFAULT 'pending',
 			schema_name VARCHAR(255) NOT NULL,
 			metadata JSONB NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-			CONSTRAINT chk_plan_type CHECK (plan_type IN ('basic', 'pro', 'enterprise')),
 			CONSTRAINT chk_status CHECK (status IN ('active', 'suspended', 'pending', 'cancelled'))
 		)`,
 
@@ -307,6 +301,21 @@ func (r *Repository) CreateMasterTables(ctx context.Context) error {
 		)`,
 
 		`ALTER TABLE public.tenants ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}'`,
+
+		// v0.7 -> v0.8: copy plan_type into metadata["plan"] for rows that
+		// have no plan key yet. Runs only if the legacy column exists and is
+		// idempotent. The column is left for the operator to drop.
+		`DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = 'public' AND table_name = 'tenants' AND column_name = 'plan_type'
+			) THEN
+				UPDATE public.tenants
+				SET metadata = metadata || jsonb_build_object('plan', plan_type)
+				WHERE plan_type IS NOT NULL AND NOT (metadata ? 'plan');
+			END IF;
+		END $$`,
 	}
 
 	indexes := []string{

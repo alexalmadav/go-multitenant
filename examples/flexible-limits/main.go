@@ -197,24 +197,24 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 			ID:        uuid.New(),
 			Name:      "Startup Corp",
 			Subdomain: "startup",
-			PlanType:  "startup",
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Business Solutions Inc",
 			Subdomain: "business",
-			PlanType:  "business",
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Scale Enterprises",
 			Subdomain: "scale",
-			PlanType:  "scale",
 			Status:    multitenant.StatusActive,
 		},
 	}
+	tenants[0].SetPlan("startup")
+	tenants[1].SetPlan("business")
+	tenants[2].SetPlan("scale")
 
 	for _, tenant := range tenants {
 		existing, err := mt.Manager.GetTenantBySubdomain(ctx, tenant.Subdomain)
@@ -230,7 +230,7 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 			return err
 		}
 
-		fmt.Printf("Created tenant: %s (%s plan)\n", tenant.Name, tenant.PlanType)
+		fmt.Printf("Created tenant: %s (%s plan)\n", tenant.Name, tenant.Plan())
 	}
 
 	return nil
@@ -311,7 +311,7 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		var req struct {
 			Name      string `json:"name" binding:"required"`
 			Subdomain string `json:"subdomain" binding:"required"`
-			PlanType  string `json:"plan_type" binding:"required"`
+			Plan      string `json:"plan" binding:"required"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -323,9 +323,9 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			ID:        uuid.New(),
 			Name:      req.Name,
 			Subdomain: req.Subdomain,
-			PlanType:  req.PlanType,
 			Status:    multitenant.StatusPending,
 		}
+		tenant.SetPlan(req.Plan)
 
 		if err := mt.Manager.CreateTenant(c.Request.Context(), tenant); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -358,7 +358,7 @@ func getTenantLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		// For demo, we'll simulate getting limits
 		c.JSON(http.StatusOK, gin.H{
 			"tenant_id": tenantID,
-			"plan_type": tenant.PlanType,
+			"plan_type": tenant.Plan(),
 			"limits":    "Would show flexible limits here",
 		})
 	}
@@ -374,7 +374,7 @@ func changeTenantPlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		var req struct {
-			PlanType string `json:"plan_type" binding:"required"`
+			Plan string `json:"plan" binding:"required"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -388,8 +388,8 @@ func changeTenantPlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			return
 		}
 
-		oldPlan := tenant.PlanType
-		tenant.PlanType = req.PlanType
+		oldPlan := tenant.Plan()
+		tenant.SetPlan(req.Plan)
 
 		if err := mt.Manager.UpdateTenant(c.Request.Context(), tenant); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -399,7 +399,7 @@ func changeTenantPlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"message":  "Plan updated successfully",
 			"old_plan": oldPlan,
-			"new_plan": req.PlanType,
+			"new_plan": req.Plan,
 		})
 	}
 }
@@ -419,16 +419,16 @@ func getCurrentLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		// For demo, return simulated limits
 		c.JSON(http.StatusOK, gin.H{
 			"tenant":    tenant.Name,
-			"plan_type": tenant.PlanType,
+			"plan_type": tenant.Plan(),
 			"limits": gin.H{
-				"max_users":                getSimulatedLimit(tenant.PlanType, "max_users"),
-				"max_projects":             getSimulatedLimit(tenant.PlanType, "max_projects"),
-				"api_calls_per_month":      getSimulatedLimit(tenant.PlanType, "api_calls_per_month"),
-				"video_processing_minutes": getSimulatedLimit(tenant.PlanType, "video_processing_minutes"),
-				"ai_model_calls":           getSimulatedLimit(tenant.PlanType, "ai_model_calls"),
-				"advanced_features":        getSimulatedFeature(tenant.PlanType, "advanced_features"),
-				"custom_branding":          getSimulatedFeature(tenant.PlanType, "custom_branding"),
-				"concurrent_connections":   getSimulatedLimit(tenant.PlanType, "concurrent_connections"),
+				"max_users":                getSimulatedLimit(tenant.Plan(), "max_users"),
+				"max_projects":             getSimulatedLimit(tenant.Plan(), "max_projects"),
+				"api_calls_per_month":      getSimulatedLimit(tenant.Plan(), "api_calls_per_month"),
+				"video_processing_minutes": getSimulatedLimit(tenant.Plan(), "video_processing_minutes"),
+				"ai_model_calls":           getSimulatedLimit(tenant.Plan(), "ai_model_calls"),
+				"advanced_features":        getSimulatedFeature(tenant.Plan(), "advanced_features"),
+				"custom_branding":          getSimulatedFeature(tenant.Plan(), "custom_branding"),
+				"concurrent_connections":   getSimulatedLimit(tenant.Plan(), "concurrent_connections"),
 			},
 		})
 	}
@@ -447,7 +447,7 @@ func checkSpecificLimit(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 		// Simulate limit checking
 		allowed := true
-		limitValue := getSimulatedLimit(tenant.PlanType, limitName)
+		limitValue := getSimulatedLimit(tenant.Plan(), limitName)
 		currentUsage := 0 // Would get from usage tracker
 
 		if limitValue > 0 && currentUsage >= limitValue {
@@ -459,7 +459,7 @@ func checkSpecificLimit(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			"allowed":       allowed,
 			"current_value": limitValue,
 			"usage":         currentUsage,
-			"plan":          tenant.PlanType,
+			"plan":          tenant.Plan(),
 		})
 	}
 }
@@ -491,7 +491,7 @@ func consumeLimit(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			"tenant":    tenant.Name,
 			"limit":     limitName,
 			"consumed":  req.Amount,
-			"remaining": getSimulatedLimit(tenant.PlanType, limitName) - req.Amount,
+			"remaining": getSimulatedLimit(tenant.Plan(), limitName) - req.Amount,
 		})
 	}
 }
@@ -506,11 +506,11 @@ func getAvailableFeatures(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			return
 		}
 
-		features := getFeaturesByPlan(tenant.PlanType)
+		features := getFeaturesByPlan(tenant.Plan())
 
 		c.JSON(http.StatusOK, gin.H{
 			"tenant":   tenant.Name,
-			"plan":     tenant.PlanType,
+			"plan":     tenant.Plan(),
 			"features": features,
 		})
 	}

@@ -87,15 +87,6 @@ func TestManager_CreateTenant(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "invalid plan type",
-			tenant: &Tenant{
-				Name:      "Test Tenant",
-				Subdomain: "test-tenant",
-				PlanType:  "invalid",
-			},
-			wantErr: true,
-		},
-		{
 			name: "invalid status",
 			tenant: &Tenant{
 				Name:      "Test Tenant",
@@ -121,9 +112,6 @@ func TestManager_CreateTenant(t *testing.T) {
 				}
 				if tt.tenant.Status == "" || tt.tenant.Status != StatusPending {
 					t.Error("CreateTenant() should set default status to pending")
-				}
-				if tt.tenant.PlanType == "" || tt.tenant.PlanType != PlanBasic {
-					t.Error("CreateTenant() should set default plan type to basic")
 				}
 				if tt.tenant.SchemaName == "" {
 					t.Error("CreateTenant() should set schema name")
@@ -179,7 +167,6 @@ func TestManager_GetTenant(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
 
@@ -221,7 +208,6 @@ func TestManager_GetTenantBySubdomain(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
 
@@ -262,7 +248,6 @@ func TestManager_UpdateTenant(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
 
@@ -301,7 +286,6 @@ func TestManager_DeleteTenant(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
 
@@ -345,7 +329,6 @@ func TestManager_ListTenants(t *testing.T) {
 			ID:        tenantID,
 			Name:      "Test Tenant",
 			Subdomain: "test-tenant",
-			PlanType:  PlanBasic,
 			Status:    StatusActive,
 		}
 		mockRepo.tenants[tenantID] = tenant
@@ -452,7 +435,6 @@ func TestManager_SuspendTenant(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
 
@@ -495,7 +477,6 @@ func TestManager_ActivateTenant(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusSuspended,
 	}
 
@@ -540,7 +521,6 @@ func TestManager_ValidateAccess(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Active Tenant",
 		Subdomain: "active-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
 	mockRepo.tenants[tenantID] = activeTenant
@@ -557,7 +537,6 @@ func TestManager_ValidateAccess(t *testing.T) {
 		ID:        suspendedTenantID,
 		Name:      "Suspended Tenant",
 		Subdomain: "suspended-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusSuspended,
 	}
 	mockRepo.tenants[suspendedTenantID] = suspendedTenant
@@ -593,9 +572,9 @@ func TestManager_CheckLimits(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Test Tenant",
 		Subdomain: "test-tenant",
-		PlanType:  PlanBasic,
 		Status:    StatusActive,
 	}
+	tenant.SetPlan(PlanBasic)
 
 	// Add to mock repository
 	mockRepo.tenants[tenantID] = tenant
@@ -670,7 +649,6 @@ func TestManager_WithTenantContext(t *testing.T) {
 		ID:         tenantID,
 		Name:       "Test Tenant",
 		Subdomain:  "test-tenant",
-		PlanType:   PlanBasic,
 		Status:     StatusActive,
 		SchemaName: "tenant_123",
 	}

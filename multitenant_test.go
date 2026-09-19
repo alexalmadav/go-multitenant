@@ -22,8 +22,7 @@ func TestNew_InvalidConfig(t *testing.T) {
 			name: "invalid database DSN",
 			config: tenant.Config{
 				Database: tenant.DatabaseConfig{
-					Driver: "postgres",
-					DSN:    "invalid-dsn",
+					DSN: "invalid-dsn",
 				},
 			},
 		},
@@ -143,15 +142,14 @@ func TestSetupLogger(t *testing.T) {
 	}
 }
 
-func TestSetupDatabase_InvalidDriver(t *testing.T) {
+func TestSetupDatabase_InvalidDSN(t *testing.T) {
 	config := tenant.DatabaseConfig{
-		Driver: "invalid-driver",
-		DSN:    "invalid-dsn",
+		DSN: "invalid-dsn",
 	}
 
 	_, err := setupDatabase(config)
 	if err == nil {
-		t.Error("setupDatabase() should return error for invalid driver")
+		t.Error("setupDatabase() should return error for invalid DSN")
 	}
 }
 
@@ -214,8 +212,8 @@ func TestReExportedConstants(t *testing.T) {
 func TestReExportedFunctions(t *testing.T) {
 	// Test DefaultConfig
 	config := DefaultConfig()
-	if config.Database.Driver != "pgx" {
-		t.Errorf("DefaultConfig().Database.Driver = %v, want pgx", config.Database.Driver)
+	if config.Database.SchemaPrefix != "tenant_" {
+		t.Errorf("DefaultConfig().Database.SchemaPrefix = %v, want tenant_", config.Database.SchemaPrefix)
 	}
 
 	// Test context helper functions
@@ -242,7 +240,6 @@ func TestReExportedFunctions(t *testing.T) {
 		TenantID:   tenantID,
 		Subdomain:  "test",
 		SchemaName: "tenant_test",
-		PlanType:   "basic",
 		Status:     "active",
 	}
 	ctxWithTenantCtx := context.WithValue(ctx, tenant.ContextKeyTenant, tenantCtx)

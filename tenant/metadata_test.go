@@ -61,3 +61,21 @@ func TestTenant_HasMetadataField(t *testing.T) {
 		t.Errorf("Tenant.Metadata not wired")
 	}
 }
+
+func TestTenant_PlanRoundTripsThroughMetadata(t *testing.T) {
+	var tn Tenant // nil Metadata on purpose
+	if got := tn.Plan(); got != "" {
+		t.Errorf("Plan() on empty tenant = %q, want \"\"", got)
+	}
+	tn.SetPlan("pro")
+	if got := tn.Plan(); got != "pro" {
+		t.Errorf("Plan() = %q, want pro", got)
+	}
+	if v, _ := tn.Metadata.GetString(PlanKey); v != "pro" {
+		t.Errorf("metadata[%q] = %q, want pro", PlanKey, v)
+	}
+	tn.SetPlan("")
+	if tn.Metadata.Has(PlanKey) {
+		t.Errorf("SetPlan(\"\") should remove the key")
+	}
+}

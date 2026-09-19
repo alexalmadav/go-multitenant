@@ -372,7 +372,6 @@ func NewTestData() *TestData {
 		ID:         tenantID,
 		Name:       "Test Tenant",
 		Subdomain:  "test-tenant",
-		PlanType:   tenant.PlanBasic,
 		Status:     tenant.StatusActive,
 		SchemaName: mockSchema.GetSchemaName(tenantID),
 		CreatedAt:  time.Now(),
@@ -409,7 +408,6 @@ func AssertTenantEqual(t1, t2 *tenant.Tenant) bool {
 	return t1.ID == t2.ID &&
 		t1.Name == t2.Name &&
 		t1.Subdomain == t2.Subdomain &&
-		t1.PlanType == t2.PlanType &&
 		t1.Status == t2.Status &&
 		t1.SchemaName == t2.SchemaName
 }

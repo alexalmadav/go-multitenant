@@ -99,9 +99,6 @@ func (m *manager) CreateTenant(ctx context.Context, tenant *Tenant) error {
 	if tenant.Status == "" {
 		tenant.Status = StatusPending
 	}
-	if tenant.PlanType == "" {
-		tenant.PlanType = PlanBasic
-	}
 	if tenant.Metadata == nil {
 		tenant.Metadata = TenantMetadata{}
 	}
@@ -297,9 +294,9 @@ func (m *manager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits,
 	}
 
 	// Get flexible plan limits
-	flexLimits := m.limitChecker.GetLimitsForPlan(tenant.PlanType)
+	flexLimits := m.limitChecker.GetLimitsForPlan(tenant.Plan())
 	if flexLimits == nil {
-		return nil, fmt.Errorf("unknown plan type: %s", tenant.PlanType)
+		return nil, fmt.Errorf("unknown plan type: %s", tenant.Plan())
 	}
 
 	// Check current usage against limits
@@ -441,7 +438,6 @@ func (m *manager) WithTenantContext(ctx context.Context, tenantID uuid.UUID) con
 		TenantID:   tenant.ID,
 		Subdomain:  tenant.Subdomain,
 		SchemaName: tenant.SchemaName,
-		PlanType:   tenant.PlanType,
 		Status:     tenant.Status,
 	}
 
@@ -468,10 +464,6 @@ func (m *manager) validateTenant(tenant *Tenant) error {
 
 	if err := m.validateSubdomain(tenant.Subdomain); err != nil {
 		return &ValidationError{Field: "subdomain", Message: err.Error()}
-	}
-
-	if tenant.PlanType != "" && !ValidatePlanType(tenant.PlanType) {
-		return &ValidationError{Field: "plan_type", Message: "invalid plan type"}
 	}
 
 	if tenant.Status != "" && !ValidateStatus(tenant.Status) {

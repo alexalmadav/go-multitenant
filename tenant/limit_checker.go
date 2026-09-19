@@ -84,9 +84,9 @@ func (lc *limitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limi
 	}
 
 	// Get plan limits
-	planLimits := lc.GetLimitsForPlan(tenant.PlanType)
+	planLimits := lc.GetLimitsForPlan(tenant.Plan())
 	if planLimits == nil {
-		lc.logger.Warn("No limits found for plan", zap.String("plan", tenant.PlanType))
+		lc.logger.Warn("No limits found for plan", zap.String("plan", tenant.Plan()))
 		return nil
 	}
 
@@ -96,7 +96,7 @@ func (lc *limitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limi
 		// If limit doesn't exist in plan, it's not restricted
 		lc.logger.Debug("Limit not defined for plan",
 			zap.String("limit", limitName),
-			zap.String("plan", tenant.PlanType))
+			zap.String("plan", tenant.Plan()))
 		return nil
 	}
 
@@ -139,9 +139,9 @@ func (lc *limitChecker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) 
 	}
 
 	// Get plan limits
-	planLimits := lc.GetLimitsForPlan(tenant.PlanType)
+	planLimits := lc.GetLimitsForPlan(tenant.Plan())
 	if planLimits == nil {
-		return fmt.Errorf("no limits found for plan: %s", tenant.PlanType)
+		return fmt.Errorf("no limits found for plan: %s", tenant.Plan())
 	}
 
 	// Check each limit in the plan

@@ -124,24 +124,24 @@ func createBillingExampleTenants(mt *multitenant.MultiTenant) error {
 			ID:        uuid.New(),
 			Name:      "Startup Inc",
 			Subdomain: "startup",
-			PlanType:  multitenant.PlanBasic,
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Enterprise Corp",
 			Subdomain: "enterprise",
-			PlanType:  multitenant.PlanEnterprise,
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Suspended Company",
 			Subdomain: "suspended",
-			PlanType:  multitenant.PlanPro,
 			Status:    multitenant.StatusSuspended,
 		},
 	}
+	tenants[0].SetPlan(multitenant.PlanBasic)
+	tenants[1].SetPlan(multitenant.PlanEnterprise)
+	tenants[2].SetPlan(multitenant.PlanPro)
 
 	for _, tenant := range tenants {
 		existing, err := mt.Manager.GetTenantBySubdomain(ctx, tenant.Subdomain)
@@ -157,7 +157,7 @@ func createBillingExampleTenants(mt *multitenant.MultiTenant) error {
 			return err
 		}
 
-		fmt.Printf("Created tenant: %s (%s plan)\n", tenant.Name, tenant.PlanType)
+		fmt.Printf("Created tenant: %s (%s plan)\n", tenant.Name, tenant.Plan())
 	}
 
 	return nil
@@ -188,14 +188,16 @@ func simulateAdminAuth() gin.HandlerFunc {
 // Handler functions
 
 func getDashboard(c *gin.Context) {
-	tenant, _ := ginmiddleware.GetTenantFromContext(c)
+	// Use the full tenant record (not the lightweight request context) since
+	// plan lives in Tenant.Metadata, not in the summary tenant.Context.
+	tenant, _ := ginmiddleware.GetTenantFromGinContext(c)
 	limits, _ := ginmiddleware.GetTenantLimitsFromContext(c)
 
 	c.JSON(http.StatusOK, gin.H{
 		"welcome":  fmt.Sprintf("Welcome to %s dashboard!", tenant.Subdomain),
-		"plan":     tenant.PlanType,
+		"plan":     tenant.Plan(),
 		"limits":   limits,
-		"features": getFeaturesByPlan(tenant.PlanType),
+		"features": getFeaturesByPlan(tenant.Plan()),
 	})
 }
 
@@ -295,7 +297,7 @@ func getAdminAnalytics(c *gin.Context) {
 		"tenant": tenant,
 		"metrics": gin.H{
 			"active_users":    25,
-			"monthly_revenue": fmt.Sprintf("$%d", getPlanPrice(tenant.PlanType)),
+			"monthly_revenue": fmt.Sprintf("$%d", getPlanPrice(tenant.Plan())),
 			"storage_usage":   "15.2GB",
 			"api_calls":       142350,
 			"last_login":      time.Now().Add(-2 * time.Hour),
@@ -327,17 +329,17 @@ func upgradePlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		// Validate plan upgrade
-		if !isValidUpgrade(tenant.PlanType, req.NewPlan) {
+		if !isValidUpgrade(tenant.Plan(), req.NewPlan) {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":          "Invalid plan upgrade",
-				"current_plan":   tenant.PlanType,
+				"current_plan":   tenant.Plan(),
 				"requested_plan": req.NewPlan,
 			})
 			return
 		}
 
 		// Update tenant plan
-		tenant.PlanType = req.NewPlan
+		tenant.SetPlan(req.NewPlan)
 		if err := mt.Manager.UpdateTenant(c.Request.Context(), tenant); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
@@ -345,7 +347,7 @@ func upgradePlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 		c.JSON(http.StatusOK, gin.H{
 			"message":        "Plan upgraded successfully",
-			"old_plan":       tenant.PlanType,
+			"old_plan":       tenant.Plan(),
 			"new_plan":       req.NewPlan,
 			"effective_date": time.Now(),
 		})
@@ -482,13 +484,13 @@ func getBillingUsage(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			"tenant": gin.H{
 				"id":   tenant.ID,
 				"name": tenant.Name,
-				"plan": tenant.PlanType,
+				"plan": tenant.Plan(),
 			},
 			"usage": stats,
 			"charges": gin.H{
-				"base_plan": getPlanPrice(tenant.PlanType),
+				"base_plan": getPlanPrice(tenant.Plan()),
 				"overages":  0, // Calculate based on usage
-				"total":     getPlanPrice(tenant.PlanType),
+				"total":     getPlanPrice(tenant.Plan()),
 			},
 			"billing_period": gin.H{
 				"start": time.Now().AddDate(0, -1, 0).Format("2006-01-02"),

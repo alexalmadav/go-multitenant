@@ -11,7 +11,6 @@ type Tenant struct {
 	ID         uuid.UUID      `json:"id"`
 	Name       string         `json:"name"`
 	Subdomain  string         `json:"subdomain"`
-	PlanType   string         `json:"plan_type"`
 	Status     string         `json:"status"`
 	SchemaName string         `json:"schema_name"`
 	Metadata   TenantMetadata `json:"metadata"`
@@ -24,7 +23,6 @@ type Context struct {
 	TenantID   uuid.UUID `json:"tenant_id"`
 	Subdomain  string    `json:"subdomain"`
 	SchemaName string    `json:"schema_name"`
-	PlanType   string    `json:"plan_type"`
 	Status     string    `json:"status"`
 }
 
@@ -67,14 +65,12 @@ type Config struct {
 
 // DatabaseConfig contains database-specific configuration
 type DatabaseConfig struct {
-	Driver          string        `json:"driver"`
 	DSN             string        `json:"dsn"`
 	MaxOpenConns    int           `json:"max_open_conns"`
 	MaxIdleConns    int           `json:"max_idle_conns"`
 	ConnMaxLifetime time.Duration `json:"conn_max_lifetime"`
 	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
 	SchemaPrefix    string        `json:"schema_prefix"`
-	MigrationsTable string        `json:"migrations_table"`
 	MigrationsDir   string        `json:"migrations_dir"`
 }
 
@@ -183,13 +179,11 @@ func DefaultConfig() Config {
 
 	return Config{
 		Database: DatabaseConfig{
-			Driver:          "pgx",
 			MaxOpenConns:    100,
 			MaxIdleConns:    50,
 			ConnMaxLifetime: 15 * time.Minute,
 			ConnMaxIdleTime: 5 * time.Minute,
 			SchemaPrefix:    "tenant_",
-			MigrationsTable: "tenant_migrations",
 			MigrationsDir:   "", // Applications should set this
 		},
 		Resolver: ResolverConfig{
@@ -217,16 +211,6 @@ func DefaultConfig() Config {
 func ValidateStatus(status string) bool {
 	switch status {
 	case StatusActive, StatusSuspended, StatusPending, StatusCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
-// ValidatePlanType validates a plan type
-func ValidatePlanType(planType string) bool {
-	switch planType {
-	case PlanBasic, PlanPro, PlanEnterprise:
 		return true
 	default:
 		return false

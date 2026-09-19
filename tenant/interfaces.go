@@ -116,17 +116,6 @@ type Repository interface {
 	FindByMetadata(ctx context.Context, key, value string) ([]*Tenant, error)
 }
 
-// Middleware represents HTTP middleware for tenant handling
-type Middleware interface {
-	ResolveTenant() MiddlewareFunc
-	ValidateTenant() MiddlewareFunc
-	EnforceLimits() MiddlewareFunc
-	LogAccess() MiddlewareFunc
-}
-
-// MiddlewareFunc represents a middleware function
-type MiddlewareFunc interface{}
-
 // ContextKey represents keys for context values
 type ContextKey string
 

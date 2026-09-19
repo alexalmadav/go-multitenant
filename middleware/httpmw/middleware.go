@@ -98,7 +98,6 @@ func (m *Middleware) ResolveTenant() func(http.Handler) http.Handler {
 				TenantID:   t.ID,
 				Subdomain:  t.Subdomain,
 				SchemaName: t.SchemaName,
-				PlanType:   t.PlanType,
 				Status:     t.Status,
 			})
 			ctx = context.WithValue(ctx, tenant.ContextKeyTenantID, t.ID)

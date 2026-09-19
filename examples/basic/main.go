@@ -97,17 +97,17 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 			ID:        uuid.New(),
 			Name:      "Acme Corporation",
 			Subdomain: "acme",
-			PlanType:  multitenant.PlanPro,
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Globex Industries",
 			Subdomain: "globex",
-			PlanType:  multitenant.PlanBasic,
 			Status:    multitenant.StatusActive,
 		},
 	}
+	tenants[0].SetPlan(multitenant.PlanPro)
+	tenants[1].SetPlan(multitenant.PlanBasic)
 
 	for _, tenant := range tenants {
 		// Check if tenant already exists
@@ -136,16 +136,18 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 // Tenant-specific handlers
 
 func getTenantInfo(c *gin.Context) {
-	tenant, exists := multitenant.GetTenantFromContext(c.Request.Context())
+	// Use the full tenant record (not the lightweight request context) since
+	// plan lives in Tenant.Metadata, not in the summary tenant.Context.
+	tenant, exists := ginmiddleware.GetTenantFromGinContext(c)
 	if !exists {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Tenant context not found"})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"tenant_id": tenant.TenantID,
+		"tenant_id": tenant.ID,
 		"subdomain": tenant.Subdomain,
-		"plan_type": tenant.PlanType,
+		"plan":      tenant.Plan(),
 		"status":    tenant.Status,
 		"message":   fmt.Sprintf("Hello from %s!", tenant.Subdomain),
 	})
@@ -233,7 +235,7 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		var req struct {
 			Name      string `json:"name" binding:"required"`
 			Subdomain string `json:"subdomain" binding:"required"`
-			PlanType  string `json:"plan_type"`
+			Plan      string `json:"plan"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -241,17 +243,17 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			return
 		}
 
-		if req.PlanType == "" {
-			req.PlanType = multitenant.PlanBasic
+		if req.Plan == "" {
+			req.Plan = multitenant.PlanBasic
 		}
 
 		tenant := &multitenant.Tenant{
 			ID:        uuid.New(),
 			Name:      req.Name,
 			Subdomain: req.Subdomain,
-			PlanType:  req.PlanType,
 			Status:    multitenant.StatusPending,
 		}
+		tenant.SetPlan(req.Plan)
 
 		if err := mt.Manager.CreateTenant(c.Request.Context(), tenant); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
