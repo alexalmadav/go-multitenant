@@ -121,7 +121,6 @@ type Middleware interface {
 	ResolveTenant() MiddlewareFunc
 	ValidateTenant() MiddlewareFunc
 	EnforceLimits() MiddlewareFunc
-	RequireAdmin() MiddlewareFunc
 	LogAccess() MiddlewareFunc
 }
 
