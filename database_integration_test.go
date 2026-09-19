@@ -16,9 +16,8 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/database"
 	dbpostgres "github.com/alexalmadav/go-multitenant/database/postgres"
-	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
+	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -1998,30 +1997,26 @@ func TestDatabase_ListTenantSchemas_OnlyMatchesPrefixLiterally(t *testing.T) {
 // SetTenantDB middleware
 // ---------------------------------------------------------------------------
 
-// tenantRouter builds a Gin router that resolves the tenant from the X-Tenant
-// header and hands the handler a dedicated tenant connection.
-func tenantRouter(mt *MultiTenant, handler gin.HandlerFunc) *gin.Engine {
-	gin.SetMode(gin.TestMode)
-	mw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{})
-	r := gin.New()
-	r.Use(mw.ResolveTenant(), mw.SetTenantDB())
-	r.GET("/count", handler)
-	return r
+// tenantHandler wraps handler with ResolveTenant (header strategy) and SetTenantDB.
+func tenantHandler(mt *MultiTenant, handler http.Handler) http.Handler {
+	mw := httpmw.New(mt.Manager, mt.Resolver, mt.GetLogger(), httpmw.Config{})
+	return httpmw.Chain(handler, mw.ResolveTenant(), mw.SetTenantDB())
 }
 
-func countProjectsHandler(c *gin.Context) {
-	conn, ok := ginmiddleware.GetTenantConnFromContext(c)
+var countProjectsHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	conn, ok := tenant.GetTenantConnFromContext(r.Context())
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "no tenant conn"})
+		http.Error(w, `{"error":"no tenant conn"}`, http.StatusInternalServerError)
 		return
 	}
 	var n int
-	if err := conn.QueryRowContext(c.Request.Context(), "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if err := conn.QueryRowContext(r.Context(), "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"count": n})
-}
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"count":%d}`, n)
+})
 
 func seedProjects(t *testing.T, mt *MultiTenant, tenantID uuid.UUID, n int) {
 	t.Helper()
@@ -2073,12 +2068,12 @@ func TestDatabase_SetTenantDB_HandlerSeesOnlyResolvedTenantsRows(t *testing.T) {
 	}
 	defer cleanupTestData(tdb.db, ids)
 
-	r := tenantRouter(mt, countProjectsHandler)
+	h := tenantHandler(mt, countProjectsHandler)
 	for i, want := range []int{2, 5} {
 		req := httptest.NewRequest(http.MethodGet, "/count", nil)
 		req.Header.Set("X-Tenant", subs[i])
 		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, req)
 
 		var body struct{ Count int }
 		_ = json.Unmarshal(rec.Body.Bytes(), &body)
@@ -2117,11 +2112,11 @@ func TestDatabase_SetTenantDB_ReleasesConnectionWithCleanSearchPath(t *testing.T
 	}
 	defer cleanupTestData(tdb.db, []uuid.UUID{id})
 
-	r := tenantRouter(mt, countProjectsHandler)
+	h := tenantHandler(mt, countProjectsHandler)
 	req := httptest.NewRequest(http.MethodGet, "/count", nil)
 	req.Header.Set("X-Tenant", sub)
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("request failed: %d %s", rec.Code, rec.Body.String())
 	}
@@ -2148,20 +2143,16 @@ func TestDatabase_SetTenantDB_WithoutResolvedTenantPassesThroughWithoutConn(t *t
 	defer tdb.close()
 	mt, _ := migrationTestEnv(t, tdb, 0)
 
-	gin.SetMode(gin.TestMode)
-	mw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{SkipPaths: []string{"/health"}})
-	r := gin.New()
-	r.Use(mw.ResolveTenant(), mw.SetTenantDB())
+	mw := httpmw.New(mt.Manager, mt.Resolver, mt.GetLogger(), httpmw.Config{SkipPaths: []string{"/health"}})
 	var hadConn, reached bool
-	r.GET("/health", func(c *gin.Context) {
+	h := httpmw.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		reached = true
-		_, hadConn = ginmiddleware.GetTenantConnFromContext(c)
-		c.Status(http.StatusOK)
-	})
+		_, hadConn = tenant.GetTenantConnFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}), mw.ResolveTenant(), mw.SetTenantDB())
 
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
-
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
 	if rec.Code != http.StatusOK || !reached {
 		t.Errorf("skipped path should reach the handler, got %d", rec.Code)
 	}

@@ -10,7 +10,7 @@ A comprehensive multi-tenant solution for Go applications using a **schema-per-t
 
 - **Complete Tenant Isolation**: Schema-per-tenant architecture with PostgreSQL
 - **Flexible Tenant Resolution**: Support for subdomain, path, and header-based tenant resolution
-- **Gin Middleware Integration**: Ready-to-use middleware for Gin web framework
+- **Framework-Neutral Middleware**: Core `net/http` middleware that works with any router, plus a drop-in Gin adapter
 - **Plan & Limit Management**: Built-in support for tenant plans and usage limits
 - **Database Migration System**: Per-tenant migration tracking and management
 - **Comprehensive Logging**: Structured logging with tenant context
@@ -45,53 +45,40 @@ Database
 
 ## 🚀 Quick Start
 
-### Basic Usage
+### Quick Start (net/http)
 
 ```go
-package main
+mt, err := multitenant.New(config)
+if err != nil { log.Fatal(err) }
+defer mt.Close()
 
-import (
-    "log"
-    "net/http"
-    
-    "github.com/alexalmadav/go-multitenant"
-    "github.com/gin-gonic/gin"
-)
+mux := http.NewServeMux()
+mux.HandleFunc("/api/dashboard", func(w http.ResponseWriter, r *http.Request) {
+    t, _ := tenant.GetTenantFromContext(r.Context())
+    fmt.Fprintf(w, "Welcome to %s", t.Subdomain)
+})
 
-func main() {
-    // Create configuration
-    config := multitenant.DefaultConfig()
-    config.Database.DSN = "postgres://user:pass@localhost/mydb?sslmode=disable"
-    config.Resolver.Strategy = multitenant.ResolverSubdomain
-    config.Resolver.Domain = "myapp.com"
+// Resolve, validate, enforce limits, and scope a DB connection per request.
+handler := mt.HTTPMiddleware.Standard()(mux)
+log.Fatal(http.ListenAndServe(":8080", handler))
+```
 
-    // Initialize multi-tenant system
-    mt, err := multitenant.New(config)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer mt.Close()
+Works with chi, gorilla/mux and anything else that takes `func(http.Handler) http.Handler`.
 
-    // Setup Gin with multi-tenant middleware
-    r := gin.Default()
-    
-    // Apply tenant middleware
-    api := r.Group("/api")
-    api.Use(mt.GinMiddleware.ResolveTenant())
-    api.Use(mt.GinMiddleware.ValidateTenant())
-    api.Use(mt.GinMiddleware.EnforceLimits())
-    
-    // Your tenant-aware routes
-    api.GET("/dashboard", func(c *gin.Context) {
-        tenant, _ := multitenant.GetTenantFromContext(c.Request.Context())
-        c.JSON(http.StatusOK, gin.H{
-            "message": "Welcome to " + tenant.Subdomain,
-            "plan": tenant.PlanType,
-        })
-    })
+### Quick Start (Gin)
 
-    log.Fatal(http.ListenAndServe(":8080", r))
-}
+The Gin adapter is a separate module so the core does not depend on Gin:
+
+```bash
+go get github.com/alexalmadav/go-multitenant/middleware/gin@v0.8.0
+```
+
+```go
+ginMw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{
+    SkipPaths: []string{"/health"},
+})
+api := r.Group("/api")
+api.Use(ginMw.ResolveTenant(), ginMw.ValidateTenant(), ginMw.EnforceLimits(), ginMw.SetTenantDB())
 ```
 
 ### Advanced Usage with Billing
@@ -125,7 +112,6 @@ mt.Manager.LimitChecker().AddLimit(multitenant.PlanPro, "beta_features", tenant.
 // Create middleware with custom error handling
 ginConfig := ginmiddleware.Config{
     SkipPaths: []string{"/health", "/billing/"},
-    RequireAuthentication: true,
     ErrorHandler: func(c *gin.Context, err error) {
         if tenantErr, ok := err.(*multitenant.TenantError); ok {
             if tenantErr.Code == "PLAN_LIMIT_EXCEEDED" {
@@ -215,49 +201,104 @@ config.Limits = tenant.LimitsConfig{
 
 ### Available Middleware
 
-```go
-// Core middleware
-mt.GinMiddleware.ResolveTenant()     // Resolves tenant from request
-mt.GinMiddleware.ValidateTenant()    // Validates tenant status
-mt.GinMiddleware.EnforceLimits()     // Enforces plan limits
-mt.GinMiddleware.SetTenantDB()       // Sets up tenant database context
+`mt.HTTPMiddleware` (package `httpmw`, `net/http`) provides five middlewares:
 
-// Additional middleware
-mt.GinMiddleware.RequireAdmin()      // Requires admin privileges
-mt.GinMiddleware.LogAccess()         // Logs tenant access
+```go
+mt.HTTPMiddleware.ResolveTenant()    // Resolves tenant from request
+mt.HTTPMiddleware.ValidateTenant()   // Validates tenant status
+mt.HTTPMiddleware.EnforceLimits()    // Enforces plan limits
+mt.HTTPMiddleware.SetTenantDB()      // Sets up tenant database context
+mt.HTTPMiddleware.LogAccess()        // Logs tenant access
 ```
+
+Access and role checks (e.g. requiring admin privileges) are the
+application's concern, not this library's — put your own auth middleware
+ahead of these in the chain. To have the authenticated user show up as
+`user_id` in `LogAccess`'s output, call `tenant.WithUserID` on the request
+context from that middleware before the request reaches `LogAccess`.
 
 ### Middleware Chain Example
 
 ```go
-api := r.Group("/api")
-api.Use(authMiddleware())                    // Your auth middleware
-api.Use(mt.GinMiddleware.ResolveTenant())    // Resolve tenant
-api.Use(mt.GinMiddleware.ValidateTenant())   // Validate tenant status
-api.Use(mt.GinMiddleware.EnforceLimits())    // Check limits
-api.Use(mt.GinMiddleware.SetTenantDB())      // Set database context
-api.Use(mt.GinMiddleware.LogAccess())        // Log access
-
-// Admin-only routes
-admin := api.Group("/admin")
-admin.Use(mt.GinMiddleware.RequireAdmin())
+handler := httpmw.Chain(mux,
+    authMiddleware,                      // Your auth middleware; sets tenant.WithUserID
+    mt.HTTPMiddleware.ResolveTenant(),   // Resolve tenant
+    mt.HTTPMiddleware.ValidateTenant(),  // Validate tenant status
+    mt.HTTPMiddleware.EnforceLimits(),   // Check limits
+    mt.HTTPMiddleware.SetTenantDB(),     // Set database context
+    mt.HTTPMiddleware.LogAccess(),       // Log access
+)
 ```
+
+Or use `mt.HTTPMiddleware.Standard()` — `ResolveTenant`, `ValidateTenant`,
+`EnforceLimits` and `SetTenantDB` chained as a single
+`func(http.Handler) http.Handler` (see [Quick Start](#quick-start-nethttp)):
+
+```go
+handler := mt.HTTPMiddleware.Standard()(mux)
+```
+
+### Gin
+
+The [Gin adapter](./middleware/gin) wraps the same five middlewares under the
+same method names. It stores every value both in the request context (read
+with package `tenant`'s helpers) and, for code that prefers it, under Gin
+context keys read with `c.Get`:
+
+| `c.Get` key | Type |
+|---|---|
+| `tenant` | `*tenant.Context` |
+| `tenant_id` | tenant UUID string |
+| `tenant_object` | `*tenant.Tenant` |
+| `tenant_conn` | `*tenant.Conn` |
+| `plan_limits` | `*tenant.Limits` |
+
+```go
+api := r.Group("/api")
+api.Use(authMiddleware())                  // Your auth middleware; sets tenant.WithUserID
+api.Use(ginMw.ResolveTenant())             // Resolve tenant
+api.Use(ginMw.ValidateTenant())            // Validate tenant status
+api.Use(ginMw.EnforceLimits())             // Check limits
+api.Use(ginMw.SetTenantDB())               // Set database context
+api.Use(ginMw.LogAccess())                 // Log access
+```
+
+Setting `c.Set("user_id", id)` from a Gin auth middleware still feeds the
+access log — the adapter bridges it onto the request context automatically.
+`tenant.WithUserID` on the request context is the framework-neutral way and
+takes precedence if both are set.
 
 ## 🗄️ Database Operations
 
 ### Tenant-Aware Database Operations
 
+With `SetTenantDB` in the chain, each request gets a dedicated connection
+scoped to the tenant schema, released when the request ends. In `net/http`
+handlers, read it with `tenant.GetTenantConnFromContext`:
+
 ```go
-// With SetTenantDB in the chain, each request gets a dedicated connection
-// scoped to the tenant schema. It is released when the request ends.
-func getProjects(c *gin.Context) {
-    conn, _ := ginmiddleware.GetTenantConnFromContext(c)
+func getProjects(w http.ResponseWriter, r *http.Request) {
+    conn, _ := tenant.GetTenantConnFromContext(r.Context())
 
     // This query only sees the current tenant's projects
-    rows, err := conn.QueryContext(c.Request.Context(),
+    rows, err := conn.QueryContext(r.Context(),
         "SELECT * FROM projects WHERE status = $1", "active")
     if err != nil { /* ... */ }
     defer rows.Close() // also ends the statement's scoping transaction
+    // ...
+}
+```
+
+In a Gin handler, the adapter's `ginmiddleware.GetTenantConnFromContext`
+does the same thing by reading the `tenant_conn` Gin context key:
+
+```go
+func getProjects(c *gin.Context) {
+    conn, _ := ginmiddleware.GetTenantConnFromContext(c)
+    rows, err := conn.QueryContext(c.Request.Context(),
+        "SELECT * FROM projects WHERE status = $1", "active")
+    if err != nil { /* ... */ }
+    defer rows.Close()
     // ...
 }
 ```
@@ -394,10 +435,11 @@ See `examples/stripe-integration` for a hook that keeps an external system in sy
 ```go
 // Validate user access to tenant
 err := mt.Manager.ValidateAccess(ctx, userID, tenantID)
-
-// Admin-only operations
-api.Use(mt.GinMiddleware.RequireAdmin())
 ```
+
+Role and admin-only checks (e.g. "is this user an admin of this tenant") are
+the application's responsibility, not this library's — enforce them in your
+own auth middleware, ahead of the tenant middleware chain.
 
 ### Input Validation
 
@@ -532,6 +574,60 @@ CREATE TABLE projects (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+## ⬆️ Upgrading from v0.7
+
+v0.8.0 (part 1) replaces the Gin-only middleware with a framework-neutral
+`net/http` core, and moves the Gin integration into its own module.
+
+- **Gin is now a separate module.** The core package no longer imports Gin.
+  If you use the Gin middleware, add the require line:
+  ```bash
+  go get github.com/alexalmadav/go-multitenant/middleware/gin@v0.8.0
+  ```
+  and import it as `ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"`.
+- **`MultiTenant.GinMiddleware` is gone; `MultiTenant.HTTPMiddleware` replaces
+  it.** `mt.HTTPMiddleware` is the `net/http` middleware (package `httpmw`),
+  usable directly with `net/http`, chi, gorilla/mux, or anything that takes
+  `func(http.Handler) http.Handler`. For Gin, build the adapter yourself:
+  `ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{...})`.
+  It exposes the same method names (`ResolveTenant`, `ValidateTenant`,
+  `EnforceLimits`, `SetTenantDB`, `LogAccess`) as `gin.HandlerFunc`s, and the
+  same `c.Get` keys (`tenant`, `tenant_id`, `tenant_object`, `tenant_conn`,
+  `plan_limits`) as before.
+- **`RequireAdmin` and `RequireAuthentication` are removed.** They are gone
+  from both `httpmw.Middleware` and the Gin adapter, and `ginmiddleware.Config`
+  no longer has a `RequireAuthentication` field. Access and role checks are
+  now entirely the application's responsibility: put your own auth middleware
+  ahead of the tenant middleware in the chain, and call `tenant.WithUserID` on
+  the request context from it if you want the user id to appear in
+  `LogAccess`'s output. Note that `multitenant.New` previously constructed
+  the Gin middleware with `RequireAuthentication: true`; after upgrading,
+  requests that used to be rejected for a missing `user_id` reach your
+  handlers until you add your own auth middleware.
+- **The `tenant.Middleware` interface lost `RequireAdmin()`.** Any code that
+  called it through the interface (rather than the concrete Gin type) no
+  longer compiles; remove the call and enforce admin access in your own
+  middleware.
+- **`TENANT_INVALID_STATUS` now returns 403** (it returned 500 before). If
+  you match on status codes rather than the `error.code` field, update that
+  check.
+- **The access log's logger name changed** from `gin_middleware` to
+  `http_middleware` for both the `net/http` core and the Gin adapter (the Gin
+  adapter is built on top of the core middleware, so it now shares the
+  core's logger name). If you filter or route logs by logger name, update
+  that filter.
+- **`client_ip` in the access log now defaults to the host part of
+  `r.RemoteAddr`**, which the client cannot spoof, instead of trusting
+  `X-Forwarded-For`/`X-Real-IP` unconditionally. If you are behind a
+  reverse proxy you control that sets `X-Forwarded-For`, opt back in with
+  `Config{ClientIP: httpmw.ForwardedClientIP}` (or, for the Gin adapter,
+  `ginmiddleware.Config{ClientIP: httpmw.ForwardedClientIP}`); make sure
+  that proxy strips or overwrites inbound `X-Forwarded-For`/`X-Real-IP`
+  headers before requests reach it, or clients can still choose the logged
+  address.
+- **Non-breaking:** `ResolveTenant` no longer fetches the tenant twice per
+  request.
 
 ## ⬆️ Upgrading from v0.6
 

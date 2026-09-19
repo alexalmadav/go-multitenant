@@ -254,10 +254,10 @@ func TestReExportedFunctions(t *testing.T) {
 func TestMultiTenant_InterfaceImplementation(t *testing.T) {
 	// Test that MultiTenant properly exposes the required interfaces
 	mt := &MultiTenant{
-		Manager:       &MockMultiTenantManager{},
-		Resolver:      &MockMultiTenantResolver{},
-		GinMiddleware: nil, // Skip gin middleware for this test
-		logger:        zaptest.NewLogger(t),
+		Manager:        &MockMultiTenantManager{},
+		Resolver:       &MockMultiTenantResolver{},
+		HTTPMiddleware: nil, // Skip middleware for this test
+		logger:         zaptest.NewLogger(t),
 	}
 
 	// Test that interfaces are accessible
@@ -368,7 +368,7 @@ func (m *MockMultiTenantResolver) ValidateSubdomain(subdomain string) error {
 	return nil
 }
 
-// MockGinMiddleware removed as it's not needed for these tests
+// Mock HTTP middleware removed as it's not needed for these tests
 
 func TestReExportedErrorTypes(t *testing.T) {
 	var tenantErr error = &TenantError{Code: "X", Message: "x"}

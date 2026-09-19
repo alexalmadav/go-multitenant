@@ -9,6 +9,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant"
 	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
+	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -61,9 +62,8 @@ func main() {
 
 	// Configure middleware with stricter settings
 	ginConfig := ginmiddleware.Config{
-		SkipPaths:             []string{"/health", "/api/public/", "/billing/"},
-		RequireAuthentication: true,
-		ErrorHandler:          customErrorHandler,
+		SkipPaths:    []string{"/health", "/api/public/", "/billing/"},
+		ErrorHandler: customErrorHandler,
 	}
 
 	mw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginConfig)
@@ -90,7 +90,8 @@ func main() {
 	{
 		admin.Use(simulateAdminAuth())
 		admin.Use(mw.ResolveTenant())
-		admin.Use(mw.RequireAdmin())
+		// The app's own admin-role check belongs here (e.g. verify the claim
+		// set by simulateAdminAuth); the library no longer ships that check.
 
 		admin.GET("/analytics", getAdminAnalytics)
 		admin.PUT("/plan", upgradePlan(mt))
@@ -521,7 +522,7 @@ func customErrorHandler(c *gin.Context, err error) {
 			}
 		default:
 			// Use default error handler for other cases
-			ginmiddleware.Config{}.ErrorHandler(c, err)
+			httpmw.DefaultErrorHandler(c.Writer, c.Request, err)
 			return
 		}
 	default:

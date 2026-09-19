@@ -10,7 +10,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/database/postgres"
-	ginmiddleware "github.com/alexalmadav/go-multitenant/middleware/gin"
+	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
@@ -19,12 +19,12 @@ import (
 
 // MultiTenant is the main struct that provides all multi-tenant functionality
 type MultiTenant struct {
-	Manager       tenant.Manager
-	Resolver      tenant.Resolver
-	Migrations    tenant.MigrationManager
-	GinMiddleware *ginmiddleware.Middleware
-	db            *sql.DB
-	logger        *zap.Logger
+	Manager        tenant.Manager
+	Resolver       tenant.Resolver
+	Migrations     tenant.MigrationManager
+	HTTPMiddleware *httpmw.Middleware
+	db             *sql.DB
+	logger         *zap.Logger
 }
 
 // New creates a new MultiTenant instance with the provided configuration
@@ -86,20 +86,19 @@ func New(config tenant.Config) (*MultiTenant, error) {
 	// Create resolver
 	resolver := tenant.NewResolver(config.Resolver, repository, logger)
 
-	// Create Gin middleware
-	ginConfig := ginmiddleware.Config{
-		SkipPaths:             []string{"/health", "/metrics", "/api/public/"},
-		RequireAuthentication: true,
-	}
-	ginMw := ginmiddleware.NewMiddleware(manager, resolver, logger, ginConfig)
+	// Framework-neutral middleware. Gin users wrap it with the adapter in
+	// github.com/alexalmadav/go-multitenant/middleware/gin.
+	httpMw := httpmw.New(manager, resolver, logger, httpmw.Config{
+		SkipPaths: []string{"/health", "/metrics", "/api/public/"},
+	})
 
 	return &MultiTenant{
-		Manager:       manager,
-		Resolver:      resolver,
-		Migrations:    migrationMgr,
-		GinMiddleware: ginMw,
-		db:            db,
-		logger:        logger,
+		Manager:        manager,
+		Resolver:       resolver,
+		Migrations:     migrationMgr,
+		HTTPMiddleware: httpMw,
+		db:             db,
+		logger:         logger,
 	}, nil
 }
 

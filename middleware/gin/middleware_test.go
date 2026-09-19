@@ -2,7 +2,6 @@ package gin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,362 +16,178 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 )
 
-// stubManager implements only the Manager methods the middleware under test
-// touches. Everything else panics via the nil embedded interface.
 type stubManager struct {
-	tenant.Manager
-	checkLimits func(ctx context.Context, tenantID uuid.UUID) (*tenant.Limits, error)
-}
-
-func (s *stubManager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*tenant.Limits, error) {
-	return s.checkLimits(ctx, tenantID)
-}
-
-func withTenant(id uuid.UUID) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set("tenant", &tenant.Context{TenantID: id, Status: tenant.StatusActive})
-		c.Next()
-	}
-}
-
-func runEnforceLimits(t *testing.T, mgr tenant.Manager) (int, map[string]any) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(mgr, nil, zap.NewNop(), Config{})
-	r := gin.New()
-	r.Use(withTenant(uuid.New()), mw.EnforceLimits())
-	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
-
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	var body map[string]any
-	if rec.Body.Len() > 0 {
-		_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	}
-	return rec.Code, body
-}
-
-func errorCode(body map[string]any) string {
-	e, _ := body["error"].(map[string]any)
-	code, _ := e["code"].(string)
-	return code
-}
-
-func TestEnforceLimits_LimitExceededReturns402(t *testing.T) {
-	mgr := &stubManager{checkLimits: func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
-		return nil, fmt.Errorf("limit check failed for max_projects: %w", &tenant.TenantError{
-			TenantID: id,
-			Code:     "LIMIT_EXCEEDED",
-			Message:  "Limit exceeded for max_projects: current=11, limit=10",
-		})
-	}}
-
-	status, body := runEnforceLimits(t, mgr)
-
-	if status != http.StatusPaymentRequired {
-		t.Errorf("status = %d, want %d", status, http.StatusPaymentRequired)
-	}
-	if got := errorCode(body); got != "PLAN_LIMIT_EXCEEDED" {
-		t.Errorf("error code = %q, want PLAN_LIMIT_EXCEEDED (body: %v)", got, body)
-	}
-}
-
-func TestEnforceLimits_FeatureNotAllowedReturns402(t *testing.T) {
-	mgr := &stubManager{checkLimits: func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
-		return nil, &tenant.TenantError{TenantID: id, Code: "FEATURE_NOT_ALLOWED", Message: "advanced_features is disabled"}
-	}}
-
-	status, body := runEnforceLimits(t, mgr)
-
-	if status != http.StatusPaymentRequired || errorCode(body) != "PLAN_LIMIT_EXCEEDED" {
-		t.Errorf("got %d %v, want 402 PLAN_LIMIT_EXCEEDED", status, body)
-	}
-}
-
-func TestEnforceLimits_UnexpectedErrorReturns500(t *testing.T) {
-	mgr := &stubManager{checkLimits: func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
-		return nil, errors.New("database is on fire")
-	}}
-
-	status, body := runEnforceLimits(t, mgr)
-
-	if status != http.StatusInternalServerError || errorCode(body) != "LIMIT_CHECK_FAILED" {
-		t.Errorf("got %d %v, want 500 LIMIT_CHECK_FAILED", status, body)
-	}
-}
-
-func TestEnforceLimits_WithinLimitsPasses(t *testing.T) {
-	mgr := &stubManager{checkLimits: func(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
-		return &tenant.Limits{MaxProjects: 10}, nil
-	}}
-
-	status, _ := runEnforceLimits(t, mgr)
-
-	if status != http.StatusOK {
-		t.Errorf("status = %d, want 200", status)
-	}
-}
-
-// --- ResolveTenant / ValidateTenant -------------------------------------
-
-type stubResolver struct {
-	tenant.Resolver
-	resolve func(ctx context.Context, req *http.Request) (uuid.UUID, error)
-}
-
-func (s *stubResolver) ResolveTenant(ctx context.Context, req *http.Request) (uuid.UUID, error) {
-	return s.resolve(ctx, req)
-}
-
-type lookupManager struct {
 	tenant.Manager
 	tenants map[uuid.UUID]*tenant.Tenant
 }
 
-func (m *lookupManager) GetTenant(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
-	if t, ok := m.tenants[id]; ok {
+func (s *stubManager) GetTenant(ctx context.Context, id uuid.UUID) (*tenant.Tenant, error) {
+	if t, ok := s.tenants[id]; ok {
 		return t, nil
 	}
 	return nil, errors.New("tenant not found")
 }
 
-func (m *lookupManager) ValidateAccess(ctx context.Context, userID, tenantID uuid.UUID) error {
-	return nil
+func (s *stubManager) CheckLimits(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
+	return &tenant.Limits{MaxProjects: 7}, nil
 }
 
-func (m *lookupManager) WithTenantContext(ctx context.Context, tenantID uuid.UUID) context.Context {
-	t := m.tenants[tenantID]
-	return context.WithValue(ctx, tenant.ContextKeyTenant, &tenant.Context{TenantID: t.ID, Subdomain: t.Subdomain, Status: t.Status})
+type stubResolver struct {
+	tenant.Resolver
+	id  uuid.UUID
+	err error
 }
 
-func newResolveRouter(t *testing.T, mgr tenant.Manager, res tenant.Resolver, cfg Config, extra ...gin.HandlerFunc) (*gin.Engine, *tenant.Context) {
-	t.Helper()
+func (s *stubResolver) ResolveTenant(ctx context.Context, r *http.Request) (uuid.UUID, error) {
+	return s.id, s.err
+}
+
+func newRouter(mw *Middleware, handlers ...gin.HandlerFunc) *gin.Engine {
 	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(mgr, res, zap.NewNop(), cfg)
-	var seen *tenant.Context
 	r := gin.New()
-	handlers := append([]gin.HandlerFunc{mw.ResolveTenant()}, extra...)
 	r.Use(handlers...)
-	r.GET("/*path", func(c *gin.Context) {
-		if tc, ok := tenant.GetTenantFromContext(c.Request.Context()); ok {
-			seen = tc
-		}
-		c.Status(http.StatusOK)
-	})
-	return r, seen
+	return r
 }
 
-func TestResolveTenant_PopulatesGinAndRequestContext(t *testing.T) {
+func TestAdapter_ResolveTenantPopulatesGinKeysAndRequestContext(t *testing.T) {
 	id := uuid.New()
-	mgr := &lookupManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}
-	res := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) { return id, nil }}
+	mgr := &stubManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}
+	mw := NewMiddleware(mgr, &stubResolver{id: id}, zap.NewNop(), Config{})
 
-	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(mgr, res, zap.NewNop(), Config{})
-	r := gin.New()
-	r.Use(mw.ResolveTenant())
-	var ginCtx, reqCtx *tenant.Context
+	var ginTenant, ctxTenant *tenant.Context
+	var ginObj *tenant.Tenant
+	var ginID string
+	var limits *tenant.Limits
+	r := newRouter(mw, mw.ResolveTenant(), mw.ValidateTenant(), mw.EnforceLimits())
 	r.GET("/", func(c *gin.Context) {
-		ginCtx, _ = GetTenantFromContext(c)
-		reqCtx, _ = tenant.GetTenantFromContext(c.Request.Context())
+		ginTenant, _ = GetTenantFromContext(c)
+		ginObj, _ = GetTenantFromGinContext(c)
+		ginID = c.GetString("tenant_id")
+		limits, _ = GetTenantLimitsFromContext(c)
+		ctxTenant, _ = tenant.GetTenantFromContext(c.Request.Context())
 		c.Status(http.StatusOK)
 	})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 
 	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
 	}
-	if ginCtx == nil || ginCtx.TenantID != id || ginCtx.Subdomain != "acme" {
-		t.Errorf("gin context tenant = %+v, want id %s", ginCtx, id)
+	if ginTenant == nil || ginTenant.TenantID != id || ctxTenant == nil || ctxTenant.TenantID != id {
+		t.Errorf("tenant context: gin=%+v ctx=%+v", ginTenant, ctxTenant)
 	}
-	if reqCtx == nil || reqCtx.TenantID != id {
-		t.Errorf("request context tenant = %+v, want id %s", reqCtx, id)
+	if ginObj == nil || ginObj.ID != id || ginID != id.String() {
+		t.Errorf("tenant_object=%+v tenant_id=%q", ginObj, ginID)
+	}
+	if limits == nil || limits.MaxProjects != 7 {
+		t.Errorf("plan_limits = %+v", limits)
 	}
 }
 
-func TestResolveTenant_UnresolvableReturns404(t *testing.T) {
-	mgr := &lookupManager{tenants: map[uuid.UUID]*tenant.Tenant{}}
-	res := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) { return uuid.Nil, errors.New("nope") }}
-	r, _ := newResolveRouter(t, mgr, res, Config{})
-
+func TestAdapter_ErrorAbortsChainWithCoreResponse(t *testing.T) {
+	mw := NewMiddleware(&stubManager{}, &stubResolver{err: errors.New("nope")}, zap.NewNop(), Config{})
+	reached := false
+	r := newRouter(mw, mw.ResolveTenant())
+	r.GET("/", func(c *gin.Context) { reached = true })
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	var body map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if rec.Code != http.StatusNotFound || errorCode(body) != "TENANT_NOT_FOUND" {
-		t.Errorf("got %d %v, want 404 TENANT_NOT_FOUND", rec.Code, body)
+	if rec.Code != http.StatusNotFound || reached {
+		t.Errorf("code = %d reached = %v", rec.Code, reached)
 	}
 }
 
-func TestResolveTenant_SkipPathsBypassResolution(t *testing.T) {
-	called := false
-	res := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
-		called = true
-		return uuid.Nil, errors.New("nope")
-	}}
-	r, _ := newResolveRouter(t, &lookupManager{}, res, Config{SkipPaths: []string{"/health"}})
+func TestAdapter_CustomErrorHandlerReceivesGinContext(t *testing.T) {
+	var got *gin.Context
+	mw := NewMiddleware(&stubManager{}, &stubResolver{err: errors.New("nope")}, zap.NewNop(), Config{
+		ErrorHandler: func(c *gin.Context, err error) {
+			got = c
+			c.JSON(http.StatusTeapot, gin.H{"custom": true})
+			c.Abort()
+		},
+	})
+	r := newRouter(mw, mw.ResolveTenant())
+	r.GET("/", func(c *gin.Context) { t.Error("handler must not run") })
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if got == nil || rec.Code != http.StatusTeapot {
+		t.Errorf("custom handler got=%v code=%d", got != nil, rec.Code)
+	}
+}
 
+func TestAdapter_SkipPathsPassThrough(t *testing.T) {
+	mw := NewMiddleware(&stubManager{}, &stubResolver{err: errors.New("nope")}, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+	r := newRouter(mw, mw.ResolveTenant(), mw.SetTenantDB())
+	r.GET("/health", func(c *gin.Context) {
+		if _, ok := GetTenantFromContext(c); ok {
+			t.Error("no tenant expected on skipped path")
+		}
+		c.Status(http.StatusOK)
+	})
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
-
 	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
-	}
-	if called {
-		t.Errorf("resolver should not run for skipped paths")
+		t.Errorf("code = %d", rec.Code)
 	}
 }
 
-func runValidate(t *testing.T, status string, cfg Config, setUser bool) (int, map[string]any) {
-	t.Helper()
-	id := uuid.New()
-	mgr := &lookupManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: status}}}
-	res := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) { return id, nil }}
-	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(mgr, res, zap.NewNop(), cfg)
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		if setUser {
-			c.Set("user_id", uuid.New().String())
-		}
-		c.Next()
-	}, mw.ResolveTenant(), mw.ValidateTenant())
-	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
-
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	var body map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	return rec.Code, body
-}
-
-func TestValidateTenant_StatusHandling(t *testing.T) {
-	cases := []struct {
-		status   string
-		wantCode int
-		wantErr  string
-	}{
-		{tenant.StatusActive, http.StatusOK, ""},
-		{tenant.StatusSuspended, http.StatusForbidden, "TENANT_SUSPENDED"},
-		{tenant.StatusPending, http.StatusForbidden, "TENANT_PENDING"},
-		{tenant.StatusCancelled, http.StatusForbidden, "TENANT_CANCELLED"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.status, func(t *testing.T) {
-			code, body := runValidate(t, tc.status, Config{}, false)
-			if code != tc.wantCode || errorCode(body) != tc.wantErr {
-				t.Errorf("status %s: got %d %q, want %d %q", tc.status, code, errorCode(body), tc.wantCode, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestValidateTenant_RequireAuthentication(t *testing.T) {
-	code, body := runValidate(t, tenant.StatusActive, Config{RequireAuthentication: true}, false)
-	if code != http.StatusUnauthorized || errorCode(body) != "USER_NOT_AUTHENTICATED" {
-		t.Errorf("without user: got %d %v, want 401 USER_NOT_AUTHENTICATED", code, body)
-	}
-	code, _ = runValidate(t, tenant.StatusActive, Config{RequireAuthentication: true}, true)
-	if code != http.StatusOK {
-		t.Errorf("with user: got %d, want 200", code)
-	}
-}
-
-// --- RequireAdmin / LogAccess --------------------------------------------
-
-func runRequireAdmin(t *testing.T, setup func(c *gin.Context)) (int, map[string]any) {
-	t.Helper()
-	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(&lookupManager{}, nil, zap.NewNop(), Config{})
-	r := gin.New()
-	r.Use(func(c *gin.Context) { setup(c); c.Next() }, mw.RequireAdmin())
-	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
-
-	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	var body map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	return rec.Code, body
-}
-
-func TestRequireAdmin_AllowsAdminRoleOrTenantAdminFlag(t *testing.T) {
-	cases := map[string]func(c *gin.Context){
-		"user_role=admin":      func(c *gin.Context) { c.Set("user_role", "admin") },
-		"is_tenant_admin=true": func(c *gin.Context) { c.Set("is_tenant_admin", true) },
-	}
-	for name, setup := range cases {
-		t.Run(name, func(t *testing.T) {
-			if code, _ := runRequireAdmin(t, setup); code != http.StatusOK {
-				t.Errorf("status = %d, want 200", code)
-			}
-		})
-	}
-}
-
-func TestRequireAdmin_RejectsNonAdminWith403(t *testing.T) {
-	id := uuid.New()
-	code, body := runRequireAdmin(t, func(c *gin.Context) {
-		c.Set("user_role", "member")
-		c.Set("tenant", &tenant.Context{TenantID: id})
+func TestAdapter_StandardChainSkipPathReachesHandler(t *testing.T) {
+	mw := NewMiddleware(&stubManager{}, &stubResolver{err: errors.New("nope")}, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+	reached := false
+	r := newRouter(mw, mw.ResolveTenant(), mw.ValidateTenant(), mw.EnforceLimits(), mw.SetTenantDB(), mw.LogAccess())
+	r.GET("/health", func(c *gin.Context) {
+		reached = true
+		c.Status(http.StatusOK)
 	})
-	if code != http.StatusForbidden || errorCode(body) != "ADMIN_REQUIRED" {
-		t.Errorf("got %d %v, want 403 ADMIN_REQUIRED", code, body)
-	}
-	if got, _ := body["tenant_id"].(string); got != id.String() {
-		t.Errorf("tenant_id in response = %q, want %s", got, id)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK || !reached {
+		t.Errorf("code = %d reached = %v, want 200 true", rec.Code, reached)
 	}
 }
 
-func TestLogAccess_EmitsOneEntryWithTenantAndRequestFields(t *testing.T) {
+func TestAdapter_LogAccessReadsGinUserIDKey(t *testing.T) {
 	core, logs := observer.New(zapcore.InfoLevel)
 	id := uuid.New()
-	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(&lookupManager{}, nil, zap.New(core), Config{})
-	r := gin.New()
-	r.Use(func(c *gin.Context) {
-		c.Set("tenant", &tenant.Context{TenantID: id, Subdomain: "acme"})
-		c.Set("user_id", "user-1")
+	mw := NewMiddleware(&stubManager{}, &stubResolver{}, zap.New(core), Config{})
+	setTenantAndUser := func(c *gin.Context) {
+		ctx := context.WithValue(c.Request.Context(), tenant.ContextKeyTenant, &tenant.Context{TenantID: id, Status: tenant.StatusActive})
+		c.Request = c.Request.WithContext(ctx)
+		c.Set("user_id", "user-9")
 		c.Next()
-	}, mw.LogAccess())
-	r.POST("/projects", func(c *gin.Context) { c.Status(http.StatusCreated) })
-
+	}
+	r := newRouter(mw, setTenantAndUser, mw.LogAccess())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/projects", nil))
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201", rec.Code)
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
 	}
 	entries := logs.FilterMessage("Tenant access").All()
 	if len(entries) != 1 {
-		t.Fatalf("expected exactly one access log entry, got %d", len(entries))
+		t.Fatalf("entries = %d", len(entries))
 	}
-	fields := entries[0].ContextMap()
-	want := map[string]string{"tenant_id": id.String(), "subdomain": "acme", "user_id": "user-1", "method": "POST", "path": "/projects"}
-	for k, v := range want {
-		if fields[k] != v {
-			t.Errorf("log field %s = %v, want %s", k, fields[k], v)
-		}
+	if got := entries[0].ContextMap()["user_id"]; got != "user-9" {
+		t.Errorf("user_id = %v, want user-9", got)
 	}
 }
 
-func TestLogAccess_WithoutTenantContextIsSilent(t *testing.T) {
-	core, logs := observer.New(zapcore.InfoLevel)
-	gin.SetMode(gin.TestMode)
-	mw := NewMiddleware(&lookupManager{}, nil, zap.New(core), Config{})
-	r := gin.New()
-	r.Use(mw.LogAccess())
-	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
-
+func TestAdapter_DownstreamHandlersRunInsideCoreNext(t *testing.T) {
+	// A wrapping middleware that records whether the downstream handler ran
+	// before its own deferred cleanup — the property SetTenantDB relies on.
+	var order []string
+	mw := NewMiddleware(&stubManager{}, &stubResolver{}, zap.NewNop(), Config{})
+	wrapped := mw.adapt(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			order = append(order, "before")
+			defer func() { order = append(order, "cleanup") }()
+			next.ServeHTTP(w, r)
+		})
+	})
+	r := newRouter(mw, wrapped)
+	r.GET("/", func(c *gin.Context) { order = append(order, "handler"); c.Status(http.StatusOK) })
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
-	}
-	if n := logs.FilterMessage("Tenant access").Len(); n != 0 {
-		t.Errorf("expected no access log without tenant context, got %d", n)
+	if want := "[before handler cleanup]"; fmt.Sprint(order) != want {
+		t.Errorf("order = %v, want %s", order, want)
 	}
 }

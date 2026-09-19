@@ -8,20 +8,27 @@ on:
 
 jobs:
   unit:
-    name: Build, vet, unit tests
+    name: Build, vet, unit tests (all modules)
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [ ".", "middleware/gin", "examples" ]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
       - name: gofmt
+        if: matrix.module == '.'
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
-      - name: Build (includes examples)
+      - name: Build
+        working-directory: ${{ matrix.module }}
         run: go build -v ./...
       - name: Vet
+        working-directory: ${{ matrix.module }}
         run: go vet ./...
       - name: Unit tests
+        working-directory: ${{ matrix.module }}
         run: go test -short -race ./...
 
   integration:
@@ -48,7 +55,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: All tests against PostgreSQL
+      - name: Root module
+        run: go test -count=1 ./...
+      - name: Gin adapter module
+        working-directory: middleware/gin
+        run: go test -count=1 ./...
+      - name: Examples module
+        working-directory: examples
         run: go test -count=1 ./...
 
   pgbouncer:
