@@ -79,3 +79,11 @@ func TestTenant_PlanRoundTripsThroughMetadata(t *testing.T) {
 		t.Errorf("SetPlan(\"\") should remove the key")
 	}
 }
+
+func TestTenant_SetPlanOnNilTenantDoesNotPanic(t *testing.T) {
+	var tn *Tenant
+	tn.SetPlan("pro") // must not panic
+	if got := tn.Plan(); got != "" {
+		t.Errorf("Plan() on nil tenant = %q, want \"\"", got)
+	}
+}

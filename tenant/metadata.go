@@ -223,7 +223,11 @@ func (t *Tenant) Plan() string {
 }
 
 // SetPlan stores the plan name in metadata. An empty plan removes the key.
+// A nil receiver is a no-op, matching Plan()'s nil-safety.
 func (t *Tenant) SetPlan(plan string) {
+	if t == nil {
+		return
+	}
 	if t.Metadata == nil {
 		t.Metadata = TenantMetadata{}
 	}
