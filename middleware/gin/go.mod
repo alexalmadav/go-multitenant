@@ -3,7 +3,7 @@ module github.com/alexalmadav/go-multitenant/middleware/gin
 go 1.24.0
 
 require (
-	github.com/alexalmadav/go-multitenant v0.7.1
+	github.com/alexalmadav/go-multitenant v0.8.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.8.0
