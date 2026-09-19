@@ -56,9 +56,9 @@ tenant := &multitenant.Tenant{
     ID:        uuid.New(),
     Name:      "Acme Corporation",
     Subdomain: "acme",
-    PlanType:  multitenant.PlanPro,
     Status:    multitenant.StatusPending,
 }
+tenant.SetPlan("pro")
 err := mt.Manager.CreateTenant(ctx, tenant)
 err = mt.Manager.ProvisionTenant(ctx, tenant.ID)
 ```
@@ -133,6 +133,22 @@ already hold from earlier in the same request) and mutate it in place. If you
 build a new `*tenant.Tenant` yourself and its `Status` is stale, `UpdateTenant`
 reverts the persisted status to that stale value and fires
 `OnTenantStatusChanged` for the reversion — nothing warns you this happened.
+
+### `Plan()` and `SetPlan()`
+
+The plan name is likewise just a metadata key, `tenant.PlanKey`
+(`"plan"`), with the same typed-getter treatment as a convenience:
+
+```go
+t.SetPlan("pro")  // t.Metadata.SetString(tenant.PlanKey, "pro")
+plan := t.Plan()   // "" if never set
+```
+
+`tenant` never interprets the string — it is opaque to the core. The
+optional `limits` package (see [FLEXIBLE_LIMITS.md](./FLEXIBLE_LIMITS.md))
+is what maps plan names to actual limits, through
+`limits.Config.PlanLimits` and, by default, `t.Plan()` itself
+(`Config.PlanOf` to use something else).
 
 ### `StripeExtension` and `BrandingExtension`
 

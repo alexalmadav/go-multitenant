@@ -167,13 +167,6 @@ func (memMig) GetAppliedMigrations(ctx context.Context, id uuid.UUID) ([]*tenant
 	return nil, nil
 }
 
-// memLimits has no usage tracker.
-type memLimits struct{ tenant.LimitChecker }
-
-func (memLimits) GetUsageTracker() tenant.UsageTracker                   { return nil }
-func (memLimits) CheckAllLimits(ctx context.Context, id uuid.UUID) error { return nil }
-func (memLimits) GetLimitsForPlan(plan string) tenant.FlexibleLimits     { return tenant.FlexibleLimits{} }
-
 func newInMemoryManager(repo *memRepo) tenant.Manager {
-	return tenant.NewManager(tenant.DefaultConfig(), nil, repo, &memSchema{schemas: map[uuid.UUID]bool{}}, memMig{}, memLimits{}, zap.NewNop())
+	return tenant.NewManager(tenant.DefaultConfig(), nil, repo, &memSchema{schemas: map[uuid.UUID]bool{}}, memMig{}, zap.NewNop())
 }

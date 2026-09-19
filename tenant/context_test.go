@@ -29,12 +29,3 @@ func TestContext_UserIDRoundTrip(t *testing.T) {
 		t.Error("empty context should report no user id")
 	}
 }
-
-func TestContext_PlanLimitsRoundTrip(t *testing.T) {
-	l := &Limits{MaxProjects: 3}
-	ctx := WithPlanLimits(context.Background(), l)
-	got, ok := PlanLimitsFromContext(ctx)
-	if !ok || got != l {
-		t.Fatalf("PlanLimitsFromContext = %v, %v", got, ok)
-	}
-}

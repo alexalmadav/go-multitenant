@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -14,9 +15,9 @@ import (
 // tableNamePattern is the only shape of table name the tracker will interpolate.
 var tableNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
-// UsageTracker implements tenant.UsageTracker by counting rows in tables of
+// UsageTracker implements limits.UsageTracker by counting rows in tables of
 // the tenant schema. Which table backs which limit comes from
-// LimitsConfig.UsageTables; limits not listed report nil and are not checked.
+// limits.Config.UsageTables; limits not listed report nil and are not checked.
 //
 // Usage is derived from the tables themselves, so Increment, Decrement and
 // Reset are no-ops.
@@ -27,7 +28,7 @@ type UsageTracker struct {
 	logger        *zap.Logger
 }
 
-var _ tenant.UsageTracker = (*UsageTracker)(nil)
+var _ limits.UsageTracker = (*UsageTracker)(nil)
 
 // NewUsageTracker creates a tracker for the given limit-to-table map. Every
 // table name must match ^[a-z_][a-z0-9_]*$.

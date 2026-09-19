@@ -16,6 +16,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/database"
 	dbpostgres "github.com/alexalmadav/go-multitenant/database/postgres"
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
@@ -160,14 +161,16 @@ var fixtureMigrationsDir = filepath.Join("testdata", "migrations")
 // testConfig returns the config integration tests use: the given DSN, the
 // fixture migrations directory, and usage tracking mapped to the two fixture
 // tables (projects, tenant_users).
-func testConfig(dsn string) tenant.Config {
-	config := tenant.DefaultConfig()
+func testConfig(dsn string) Config {
+	config := DefaultConfig()
 	config.Database.DSN = dsn
 	config.Database.MigrationsDir = fixtureMigrationsDir
-	config.Limits.UsageTables = map[string]string{
+	l := limits.ExampleConfig()
+	l.UsageTables = map[string]string{
 		"max_projects": "projects",
 		"max_users":    "tenant_users",
 	}
+	config.Limits = &l
 	return config
 }
 
@@ -810,7 +813,6 @@ func TestDatabase_FullLifecycle_WithMultiTenant(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Full Lifecycle Test",
 		Subdomain: "full-lifecycle-test",
-		PlanType:  tenant.PlanBasic,
 	}
 
 	err = mt.Manager.CreateTenant(ctx, testTenant)
@@ -960,7 +962,6 @@ func TestDatabase_ConcurrentTenantCreation_NoSchemaLeakage(t *testing.T) {
 				ID:        id,
 				Name:      fmt.Sprintf("Concurrent Tenant %d", index),
 				Subdomain: fmt.Sprintf("concurrent-test-%d-%s", index, id.String()[:8]),
-				PlanType:  tenant.PlanBasic,
 			}
 
 			if err := mt.Manager.CreateTenant(ctx, tnt); err != nil {
@@ -1036,7 +1037,6 @@ func TestDatabase_GetTenantConn_SearchPath(t *testing.T) {
 		ID:        tenantID,
 		Name:      "SearchPath Test Tenant",
 		Subdomain: fmt.Sprintf("searchpath-test-%s", tenantID.String()[:8]),
-		PlanType:  tenant.PlanBasic,
 	}
 
 	if err := mt.Manager.CreateTenant(ctx, testTenant); err != nil {
@@ -1097,7 +1097,6 @@ func TestDatabase_GetTenantConn_Isolation(t *testing.T) {
 			ID:        id,
 			Name:      fmt.Sprintf("Isolation Test Tenant %d", i+1),
 			Subdomain: fmt.Sprintf("isolation-test-%d-%s", i+1, id.String()[:8]),
-			PlanType:  tenant.PlanBasic,
 		}
 		if err := mt.Manager.CreateTenant(ctx, tnt); err != nil {
 			t.Fatalf("CreateTenant %d failed: %v", i+1, err)
@@ -1209,7 +1208,6 @@ func TestDatabase_WithTenantTx_Rollback(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Rollback Test Tenant",
 		Subdomain: fmt.Sprintf("rollback-test-%s", tenantID.String()[:8]),
-		PlanType:  tenant.PlanBasic,
 	}
 
 	if err := mt.Manager.CreateTenant(ctx, testTenant); err != nil {
@@ -1316,7 +1314,6 @@ func TestDatabase_GetTenantConn_ConcurrentIsolation(t *testing.T) {
 			ID:        id,
 			Name:      fmt.Sprintf("Concurrent Isolation Tenant %d", i),
 			Subdomain: fmt.Sprintf("concurrent-iso-%d-%s", i, id.String()[:8]),
-			PlanType:  tenant.PlanBasic,
 		}
 
 		if err := mt.Manager.CreateTenant(ctx, tnt); err != nil {
@@ -1449,7 +1446,6 @@ func TestDatabase_WithTenantTx_ConcurrentIsolation(t *testing.T) {
 			ID:        id,
 			Name:      fmt.Sprintf("TxConcurrent Tenant %d", i),
 			Subdomain: fmt.Sprintf("txconcurrent-%d-%s", i, id.String()[:8]),
-			PlanType:  tenant.PlanBasic,
 		}
 
 		if err := mt.Manager.CreateTenant(ctx, tnt); err != nil {
@@ -1575,7 +1571,6 @@ func TestDatabase_GetTenantConn_ResetsSearchPathOnClose(t *testing.T) {
 		ID:        tenantID,
 		Name:      "Reset SearchPath Tenant",
 		Subdomain: fmt.Sprintf("reset-sp-%s", tenantID.String()[:8]),
-		PlanType:  tenant.PlanBasic,
 	}
 	if err := mt.Manager.CreateTenant(ctx, testTenant); err != nil {
 		t.Fatalf("CreateTenant failed: %v", err)
@@ -1627,8 +1622,11 @@ func migrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uuid.UU
 			ID:        id,
 			Name:      fmt.Sprintf("Migration Tenant %d", i),
 			Subdomain: fmt.Sprintf("mig-%s", id.String()[:8]),
-			PlanType:  tenant.PlanBasic,
 		}
+		// CreateTenant no longer defaults an unset plan to basic (that SaaS
+		// opinion moved out of the core); set it explicitly so downstream
+		// limit-enforcement tests can resolve plan limits.
+		tt.SetPlan(limits.PlanBasic)
 		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
 			t.Fatalf("CreateTenant failed: %v", err)
 		}
@@ -1668,8 +1666,8 @@ func bareMigrationTestEnv(t *testing.T, tdb *testDB, n int) (*MultiTenant, []uui
 			ID:        id,
 			Name:      fmt.Sprintf("Migration Tenant %d", i),
 			Subdomain: fmt.Sprintf("mig-%s", id.String()[:8]),
-			PlanType:  tenant.PlanBasic,
 		}
+		tt.SetPlan(limits.PlanBasic)
 		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
 			t.Fatalf("CreateTenant failed: %v", err)
 		}
@@ -1890,9 +1888,9 @@ func TestDatabase_Limits_ProjectCountAboveBasicPlanIsRejected(t *testing.T) {
 		t.Fatalf("failed to seed projects: %v", err)
 	}
 
-	_, err = mt.Manager.CheckLimits(ctx, tenantID)
+	_, err = mt.Limits.CheckTenant(ctx, tenantID)
 	if err == nil {
-		t.Fatalf("expected CheckLimits to fail with 11 projects on the basic plan")
+		t.Fatalf("expected CheckTenant to fail with 11 projects on the basic plan")
 	}
 	var tenantErr *tenant.TenantError
 	if !errors.As(err, &tenantErr) || tenantErr.Code != "LIMIT_EXCEEDED" {
@@ -1919,7 +1917,7 @@ func TestDatabase_Limits_ProjectCountAtBasicPlanLimitIsAllowed(t *testing.T) {
 		t.Fatalf("failed to seed projects: %v", err)
 	}
 
-	if _, err := mt.Manager.CheckLimits(ctx, tenantID); err != nil {
+	if _, err := mt.Limits.CheckTenant(ctx, tenantID); err != nil {
 		t.Errorf("10 projects should be within the basic plan limit, got: %v", err)
 	}
 }
@@ -1930,16 +1928,16 @@ func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
 	mt, ids := migrationTestEnv(t, tdb, 1)
 	ctx := context.Background()
 
-	checker := mt.Manager.LimitChecker()
+	checker := mt.Limits
 	if checker == nil {
-		t.Fatalf("Manager.LimitChecker() returned nil")
+		t.Fatalf("MultiTenant.Limits is nil")
 	}
 	if checker.GetUsageTracker() == nil {
 		t.Fatalf("New() should wire a default usage tracker")
 	}
 
 	// Tighten the basic plan at runtime and verify it takes effect.
-	if err := checker.UpdateLimit(tenant.PlanBasic, "max_projects", 0); err != nil {
+	if err := checker.UpdateLimit(limits.PlanBasic, "max_projects", 0); err != nil {
 		t.Fatalf("UpdateLimit failed: %v", err)
 	}
 	err := mt.Manager.WithTenantTx(ctx, ids[0], func(tx *sql.Tx) error {
@@ -1949,7 +1947,7 @@ func TestDatabase_Limits_CheckerIsExposedAndSwappable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to seed project: %v", err)
 	}
-	if _, err := mt.Manager.CheckLimits(ctx, ids[0]); err == nil {
+	if _, err := mt.Limits.CheckTenant(ctx, ids[0]); err == nil {
 		t.Errorf("expected failure after lowering max_projects to 0")
 	}
 }
@@ -2055,7 +2053,7 @@ func TestDatabase_SetTenantDB_HandlerSeesOnlyResolvedTenantsRows(t *testing.T) {
 	for i, n := range []int{2, 5} {
 		id := uuid.New()
 		sub := fmt.Sprintf("mw-%d-%s", i, id.String()[:8])
-		tt := &tenant.Tenant{ID: id, Name: sub, Subdomain: sub, PlanType: tenant.PlanBasic}
+		tt := &tenant.Tenant{ID: id, Name: sub, Subdomain: sub}
 		if err := mt.Manager.CreateTenant(ctx, tt); err != nil {
 			t.Fatalf("CreateTenant failed: %v", err)
 		}
@@ -2429,7 +2427,7 @@ func TestDatabase_UsageTracker_CountsConfiguredTableAndSkipsOthers(t *testing.T)
 	ctx := context.Background()
 	seedProjects(t, mt, ids[0], 3)
 
-	tracker := mt.Manager.LimitChecker().GetUsageTracker()
+	tracker := mt.Limits.GetUsageTracker()
 	v, err := tracker.GetCurrentUsage(ctx, ids[0], "max_projects")
 	if err != nil || v != 3 {
 		t.Errorf("max_projects usage = %v, %v; want 3", v, err)
@@ -2440,7 +2438,7 @@ func TestDatabase_UsageTracker_CountsConfiguredTableAndSkipsOthers(t *testing.T)
 	}
 }
 
-func TestDatabase_GetStats_ReportsMigrationsAndUsage(t *testing.T) {
+func TestDatabase_GetStats_ReportsMigrationsAndLimitsUsage(t *testing.T) {
 	tdb := newTestDB(t)
 	defer tdb.close()
 	mt, ids := migrationTestEnv(t, tdb, 1)
@@ -2457,8 +2455,12 @@ func TestDatabase_GetStats_ReportsMigrationsAndUsage(t *testing.T) {
 	if stats.AppliedMigrations != 2 { // fixture has 001 and 002
 		t.Errorf("AppliedMigrations = %d, want 2", stats.AppliedMigrations)
 	}
-	if stats.Usage["max_projects"] != 2 || stats.Usage["max_users"] != 0 {
-		t.Errorf("Usage = %v, want max_projects=2 max_users=0", stats.Usage)
+	usage, err := mt.Limits.Usage(ctx, ids[0])
+	if err != nil {
+		t.Fatalf("Usage: %v", err)
+	}
+	if usage["max_projects"] != 2 || usage["max_users"] != 0 {
+		t.Errorf("Usage = %v, want max_projects=2 max_users=0", usage)
 	}
 }
 
@@ -2789,5 +2791,342 @@ func TestDatabase_TenantConn_FailedStatementRollsBackAndConnStaysUsable(t *testi
 	var n int
 	if err := conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM projects").Scan(&n); err != nil {
 		t.Fatalf("connection unusable after failed statement: %v", err)
+	}
+}
+
+// assertPlanTypeNeutralized checks that the legacy plan_type column has no
+// default and is nullable, and that each given row's plan_type is NULL —
+// the state the one-time migration must leave behind so a later restart is
+// a no-op instead of re-deriving a plan from a column v0.8 no longer writes.
+func assertPlanTypeNeutralized(t *testing.T, tdb *testDB, ids ...uuid.UUID) {
+	t.Helper()
+	var colDefault sql.NullString
+	var nullable string
+	if err := tdb.db.QueryRow(`SELECT column_default, is_nullable FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='tenants' AND column_name='plan_type'`).Scan(&colDefault, &nullable); err != nil {
+		t.Fatal(err)
+	}
+	if colDefault.Valid {
+		t.Errorf("plan_type still has a default: %q", colDefault.String)
+	}
+	if nullable != "YES" {
+		t.Errorf("plan_type is_nullable = %q, want YES", nullable)
+	}
+	for _, id := range ids {
+		var pt sql.NullString
+		if err := tdb.db.QueryRow(`SELECT plan_type FROM public.tenants WHERE id = $1`, id).Scan(&pt); err != nil {
+			t.Fatal(err)
+		}
+		if pt.Valid {
+			t.Errorf("tenant %s plan_type = %q, want NULL", id, pt.String)
+		}
+	}
+}
+
+// TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce simulates a v0.7 table
+// whose rows have plan_type and no metadata plan, then starts New. The copy
+// must run exactly once: plan_type ends up nullable with no default and
+// NULL on every row, so a later restart (or a plan-less CreateTenant after
+// the upgrade) can never have a plan re-derived for it from the column.
+func TestDatabase_PlanTypeColumnIsCopiedIntoMetadataOnce(t *testing.T) {
+	tdb := newTestDB(t)
+	t.Cleanup(tdb.close)
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	if _, err := tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	// v0.7 shape: plan_type column present, metadata present.
+	if _, err := tdb.db.Exec(`CREATE TABLE public.tenants (
+		id UUID PRIMARY KEY, name VARCHAR(255) NOT NULL, subdomain VARCHAR(255) UNIQUE NOT NULL,
+		plan_type VARCHAR(50) NOT NULL DEFAULT 'basic', status VARCHAR(50) NOT NULL DEFAULT 'pending',
+		schema_name VARCHAR(255) NOT NULL, metadata JSONB NOT NULL DEFAULT '{}',
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	// Restore the real table for later tests (LIFO: runs before tdb.close).
+	t.Cleanup(func() {
+		_, _ = tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`)
+	})
+	proID, keepID := uuid.New(), uuid.New()
+	if _, err := tdb.db.Exec(`INSERT INTO public.tenants (id, name, subdomain, plan_type, schema_name, metadata) VALUES
+		($1, 'pro', 'plan-pro-'||$1::text, 'pro', 'tenant_x', '{}'),
+		($2, 'keep', 'plan-keep-'||$2::text, 'basic', 'tenant_y', '{"plan":"custom"}')`, proID, keepID); err != nil {
+		t.Fatal(err)
+	}
+
+	mt, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer mt.Close()
+
+	got, err := mt.Manager.GetTenant(context.Background(), proID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Plan() != "pro" {
+		t.Errorf("plan copied from plan_type = %q, want pro", got.Plan())
+	}
+	kept, _ := mt.Manager.GetTenant(context.Background(), keepID)
+	if kept.Plan() != "custom" {
+		t.Errorf("existing metadata plan must not be overwritten, got %q", kept.Plan())
+	}
+
+	// Column is left in place for the operator to drop later, but made
+	// nullable with no default and emptied on every row.
+	var hasCol bool
+	if err := tdb.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+		WHERE table_schema='public' AND table_name='tenants' AND column_name='plan_type')`).Scan(&hasCol); err != nil || !hasCol {
+		t.Errorf("plan_type column should still exist, exists=%v err=%v", hasCol, err)
+	}
+	assertPlanTypeNeutralized(t, tdb, proID, keepID)
+
+	// Second start is idempotent and new rows never touch plan_type.
+	mt2, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	defer mt2.Close()
+	newID := uuid.New()
+	nt := &tenant.Tenant{ID: newID, Name: "new", Subdomain: "plan-new-" + newID.String()[:8]}
+	nt.SetPlan("enterprise")
+	if err := mt2.Manager.CreateTenant(context.Background(), nt); err != nil {
+		t.Fatalf("CreateTenant on migrated table: %v", err)
+	}
+	back, _ := mt2.Manager.GetTenant(context.Background(), newID)
+	if back.Plan() != "enterprise" {
+		t.Errorf("plan on new tenant = %q", back.Plan())
+	}
+
+	// The critical repro of finding #1: a tenant created after the upgrade
+	// WITHOUT SetPlan must not silently acquire "basic" (the legacy
+	// column's old default) on this or any later restart.
+	noPlanID := uuid.New()
+	noPlan := &tenant.Tenant{ID: noPlanID, Name: "no-plan", Subdomain: "plan-none-" + noPlanID.String()[:8]}
+	if err := mt2.Manager.CreateTenant(context.Background(), noPlan); err != nil {
+		t.Fatalf("CreateTenant (no plan): %v", err)
+	}
+	if got, _ := mt2.Manager.GetTenant(context.Background(), noPlanID); got.Plan() != "" {
+		t.Errorf("plan-less tenant right after CreateTenant = %q, want \"\"", got.Plan())
+	}
+
+	// A third start (another restart/deploy) must leave it alone.
+	mt3, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("third New: %v", err)
+	}
+	defer mt3.Close()
+	if got, _ := mt3.Manager.GetTenant(context.Background(), noPlanID); got.Plan() != "" {
+		t.Errorf("plan-less tenant after a second restart = %q, want \"\" (finding #1 regression)", got.Plan())
+	}
+
+	// Nothing in the table should have a non-NULL plan_type any more.
+	var nonNull int
+	if err := tdb.db.QueryRow(`SELECT COUNT(*) FROM public.tenants WHERE plan_type IS NOT NULL`).Scan(&nonNull); err != nil {
+		t.Fatal(err)
+	}
+	if nonNull != 0 {
+		t.Errorf("rows with non-NULL plan_type = %d, want 0", nonNull)
+	}
+}
+
+// TestDatabase_PlanTypeSetPlanEmptySurvivesRestart simulates an operator who
+// deliberately clears a plan that was copied from the legacy plan_type
+// column with SetPlan(""). That must stick across restarts, not be silently
+// reinstated by the migration re-running.
+func TestDatabase_PlanTypeSetPlanEmptySurvivesRestart(t *testing.T) {
+	tdb := newTestDB(t)
+	t.Cleanup(tdb.close)
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	if _, err := tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	// v0.7 shape again.
+	if _, err := tdb.db.Exec(`CREATE TABLE public.tenants (
+		id UUID PRIMARY KEY, name VARCHAR(255) NOT NULL, subdomain VARCHAR(255) UNIQUE NOT NULL,
+		plan_type VARCHAR(50) NOT NULL DEFAULT 'basic', status VARCHAR(50) NOT NULL DEFAULT 'pending',
+		schema_name VARCHAR(255) NOT NULL, metadata JSONB NOT NULL DEFAULT '{}',
+		created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = tdb.db.Exec(`DROP TABLE IF EXISTS public.tenant_migrations; DROP TABLE IF EXISTS public.tenants CASCADE`)
+	})
+	id := uuid.New()
+	if _, err := tdb.db.Exec(`INSERT INTO public.tenants (id, name, subdomain, plan_type, schema_name, metadata) VALUES
+		($1, 'clearme', 'plan-clear-'||$1::text, 'basic', 'tenant_z', '{}')`, id); err != nil {
+		t.Fatal(err)
+	}
+
+	mt, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer mt.Close()
+
+	tn, err := mt.Manager.GetTenant(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tn.Plan() != "basic" {
+		t.Fatalf("plan copied from legacy column = %q, want basic", tn.Plan())
+	}
+
+	tn.SetPlan("")
+	if err := mt.Manager.UpdateTenant(context.Background(), tn); err != nil {
+		t.Fatalf("UpdateTenant: %v", err)
+	}
+	cleared, err := mt.Manager.GetTenant(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Plan() != "" {
+		t.Fatalf("plan right after SetPlan(\"\") = %q, want \"\"", cleared.Plan())
+	}
+
+	// Restart: the cleared plan must not be reinstated from plan_type,
+	// because plan_type was already nulled by the first startup's migration.
+	mt2, err := New(testConfig(connStr))
+	if err != nil {
+		t.Fatalf("second New: %v", err)
+	}
+	defer mt2.Close()
+	after, err := mt2.Manager.GetTenant(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Plan() != "" {
+		t.Errorf("plan after restart = %q, want \"\" (finding #1 regression)", after.Plan())
+	}
+	assertPlanTypeNeutralized(t, tdb, id)
+}
+
+func TestDatabase_EnforceLimits_ThroughHTTPMiddleware(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	config := testConfig(connStr)
+	config.Resolver.Strategy = tenant.ResolverHeader
+	config.Resolver.HeaderName = "X-Tenant"
+	mt, err := New(config)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	defer mt.Close()
+	ctx := context.Background()
+
+	id := uuid.New()
+	sub := "enforce-" + id.String()[:8]
+	tn := &tenant.Tenant{ID: id, Name: sub, Subdomain: sub}
+	tn.SetPlan(limits.PlanBasic)
+	if err := mt.Manager.CreateTenant(ctx, tn); err != nil {
+		t.Fatalf("CreateTenant failed: %v", err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatalf("ProvisionTenant failed: %v", err)
+	}
+	defer cleanupTestData(tdb.db, []uuid.UUID{id})
+
+	seedProjects(t, mt, id, 11) // basic allows 10
+
+	var seen limits.FlexibleLimits
+	h := httpmw.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen, _ = limits.FromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}), mt.HTTPMiddleware.ResolveTenant(), mt.HTTPMiddleware.EnforceLimits())
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("X-Tenant", sub)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("11 projects on basic: got %d %s, want 402", rec.Code, rec.Body.String())
+	}
+
+	// Under the limit, the checked limits reach the handler.
+	if err := mt.Manager.WithTenantTx(ctx, id, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, "DELETE FROM projects")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("0 projects: got %d %s", rec.Code, rec.Body.String())
+	}
+	if n, _ := seen.GetInt("max_projects"); n != 10 {
+		t.Errorf("limits in context = %v", seen)
+	}
+}
+
+func TestDatabase_Limits_UsageCountsConfiguredTables(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	mt, ids := migrationTestEnv(t, tdb, 1)
+	seedProjects(t, mt, ids[0], 4)
+	usage, err := mt.Limits.Usage(context.Background(), ids[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage["max_projects"] != 4 || usage["max_users"] != 0 {
+		t.Errorf("usage = %v", usage)
+	}
+}
+
+func TestDatabase_NoLimitsConfigDisablesEnforcement(t *testing.T) {
+	tdb := newTestDB(t)
+	defer tdb.close()
+	connStr := tdb.getConnectionString()
+	if connStr == "" {
+		t.Skip("No connection string available")
+	}
+	cfg := testConfig(connStr)
+	cfg.Limits = nil
+	mt, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mt.Close()
+	if mt.Limits != nil {
+		t.Fatal("Limits should be nil when Config.Limits is nil")
+	}
+	ctx := context.Background()
+	id := uuid.New()
+	defer cleanupTestData(tdb.db, []uuid.UUID{id})
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: id, Name: "n", Subdomain: "nolimits-" + id.String()[:8]}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	seedProjects(t, mt, id, 50)
+	h := httpmw.Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }),
+		withTenantCtx(id), mt.HTTPMiddleware.EnforceLimits())
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("EnforceLimits with no checker must pass through, got %d", rec.Code)
+	}
+}
+
+// withTenantCtx injects a resolved tenant context for tests that skip ResolveTenant.
+func withTenantCtx(id uuid.UUID) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), tenant.ContextKeyTenant, &tenant.Context{TenantID: id, Status: tenant.StatusActive})
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
 }

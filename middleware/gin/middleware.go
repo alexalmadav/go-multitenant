@@ -4,13 +4,15 @@
 // Every value is available both in the request context (read with package
 // tenant's helpers) and, for backward compatibility, under the Gin context
 // keys "tenant", "tenant_id", "tenant_object", "tenant_conn" and
-// "plan_limits".
+// "plan_limits" (a limits.FlexibleLimits, set only when Config.Limits is
+// configured).
 package gin
 
 import (
 	"context"
 	"net/http"
 
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/middleware/httpmw"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/gin-gonic/gin"
@@ -30,6 +32,9 @@ type Config struct {
 	// a trusted reverse proxy that sets X-Forwarded-For, use
 	// httpmw.ForwardedClientIP.
 	ClientIP func(*http.Request) string
+	// Limits enables EnforceLimits; nil is a pass-through. Use the checker
+	// from multitenant.MultiTenant.Limits, or any limits.Enforcer.
+	Limits limits.Enforcer
 }
 
 // Middleware provides Gin handlers backed by httpmw.
@@ -54,7 +59,11 @@ func NewMiddleware(manager tenant.Manager, resolver tenant.Resolver, logger *zap
 			httpmw.DefaultErrorHandler(w, r, err)
 		}
 	}
-	return &Middleware{core: httpmw.New(manager, resolver, logger, coreCfg)}
+	var opts []httpmw.Option
+	if cfg.Limits != nil {
+		opts = append(opts, httpmw.WithLimits(cfg.Limits))
+	}
+	return &Middleware{core: httpmw.New(manager, resolver, logger, coreCfg, opts...)}
 }
 
 // adapt turns a net/http middleware into a Gin handler. The rest of the Gin
@@ -96,7 +105,7 @@ func syncContext(c *gin.Context) {
 	if conn, ok := tenant.GetTenantConnFromContext(ctx); ok {
 		c.Set("tenant_conn", conn)
 	}
-	if l, ok := tenant.PlanLimitsFromContext(ctx); ok {
+	if l, ok := limits.FromContext(ctx); ok {
 		c.Set("plan_limits", l)
 	}
 }
@@ -107,7 +116,8 @@ func (m *Middleware) ResolveTenant() gin.HandlerFunc { return m.adapt(m.core.Res
 // ValidateTenant rejects requests whose tenant is not active.
 func (m *Middleware) ValidateTenant() gin.HandlerFunc { return m.adapt(m.core.ValidateTenant()) }
 
-// EnforceLimits checks plan limits and stores them under "plan_limits".
+// EnforceLimits checks plan limits with Config.Limits and stores them under
+// "plan_limits". Without Config.Limits it is a pass-through.
 func (m *Middleware) EnforceLimits() gin.HandlerFunc { return m.adapt(m.core.EnforceLimits()) }
 
 // SetTenantDB acquires a tenant-scoped connection for the request.
@@ -138,12 +148,12 @@ func GetTenantFromGinContext(c *gin.Context) (*tenant.Tenant, bool) {
 }
 
 // GetTenantLimitsFromContext returns the limits set by EnforceLimits.
-func GetTenantLimitsFromContext(c *gin.Context) (*tenant.Limits, bool) {
+func GetTenantLimitsFromContext(c *gin.Context) (limits.FlexibleLimits, bool) {
 	v, ok := c.Get("plan_limits")
 	if !ok {
 		return nil, false
 	}
-	l, ok := v.(*tenant.Limits)
+	l, ok := v.(limits.FlexibleLimits)
 	return l, ok
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -28,8 +29,13 @@ func (s *stubManager) GetTenant(ctx context.Context, id uuid.UUID) (*tenant.Tena
 	return nil, errors.New("tenant not found")
 }
 
-func (s *stubManager) CheckLimits(ctx context.Context, id uuid.UUID) (*tenant.Limits, error) {
-	return &tenant.Limits{MaxProjects: 7}, nil
+// stubEnforcer is a limits.Enforcer whose CheckTenant is supplied per test.
+type stubEnforcer struct {
+	check func(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error)
+}
+
+func (s stubEnforcer) CheckTenant(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error) {
+	return s.check(ctx, id)
 }
 
 type stubResolver struct {
@@ -52,18 +58,21 @@ func newRouter(mw *Middleware, handlers ...gin.HandlerFunc) *gin.Engine {
 func TestAdapter_ResolveTenantPopulatesGinKeysAndRequestContext(t *testing.T) {
 	id := uuid.New()
 	mgr := &stubManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}
-	mw := NewMiddleware(mgr, &stubResolver{id: id}, zap.NewNop(), Config{})
+	enforcer := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return limits.FlexibleLimits{"max_projects": limits.IntLimit(7)}, nil
+	}}
+	mw := NewMiddleware(mgr, &stubResolver{id: id}, zap.NewNop(), Config{Limits: enforcer})
 
 	var ginTenant, ctxTenant *tenant.Context
 	var ginObj *tenant.Tenant
 	var ginID string
-	var limits *tenant.Limits
+	var planLimits limits.FlexibleLimits
 	r := newRouter(mw, mw.ResolveTenant(), mw.ValidateTenant(), mw.EnforceLimits())
 	r.GET("/", func(c *gin.Context) {
 		ginTenant, _ = GetTenantFromContext(c)
 		ginObj, _ = GetTenantFromGinContext(c)
 		ginID = c.GetString("tenant_id")
-		limits, _ = GetTenantLimitsFromContext(c)
+		planLimits, _ = GetTenantLimitsFromContext(c)
 		ctxTenant, _ = tenant.GetTenantFromContext(c.Request.Context())
 		c.Status(http.StatusOK)
 	})
@@ -79,8 +88,8 @@ func TestAdapter_ResolveTenantPopulatesGinKeysAndRequestContext(t *testing.T) {
 	if ginObj == nil || ginObj.ID != id || ginID != id.String() {
 		t.Errorf("tenant_object=%+v tenant_id=%q", ginObj, ginID)
 	}
-	if limits == nil || limits.MaxProjects != 7 {
-		t.Errorf("plan_limits = %+v", limits)
+	if got, err := planLimits.GetInt("max_projects"); err != nil || got != 7 {
+		t.Errorf("plan_limits = %+v (%v)", planLimits, err)
 	}
 }
 

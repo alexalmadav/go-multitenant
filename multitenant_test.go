@@ -16,14 +16,15 @@ import (
 func TestNew_InvalidConfig(t *testing.T) {
 	tests := []struct {
 		name   string
-		config tenant.Config
+		config Config
 	}{
 		{
 			name: "invalid database DSN",
-			config: tenant.Config{
-				Database: tenant.DatabaseConfig{
-					Driver: "postgres",
-					DSN:    "invalid-dsn",
+			config: Config{
+				Config: tenant.Config{
+					Database: tenant.DatabaseConfig{
+						DSN: "invalid-dsn",
+					},
 				},
 			},
 		},
@@ -143,15 +144,14 @@ func TestSetupLogger(t *testing.T) {
 	}
 }
 
-func TestSetupDatabase_InvalidDriver(t *testing.T) {
+func TestSetupDatabase_InvalidDSN(t *testing.T) {
 	config := tenant.DatabaseConfig{
-		Driver: "invalid-driver",
-		DSN:    "invalid-dsn",
+		DSN: "invalid-dsn",
 	}
 
 	_, err := setupDatabase(config)
 	if err == nil {
-		t.Error("setupDatabase() should return error for invalid driver")
+		t.Error("setupDatabase() should return error for invalid DSN")
 	}
 }
 
@@ -160,7 +160,6 @@ func TestReExportedTypes(t *testing.T) {
 	var tenant Tenant
 	var context Context
 	var config Config
-	var limits Limits
 	var stats Stats
 	var migration Migration
 
@@ -168,7 +167,6 @@ func TestReExportedTypes(t *testing.T) {
 	_ = tenant
 	_ = context
 	_ = config
-	_ = limits
 	_ = stats
 	_ = migration
 }
@@ -188,17 +186,6 @@ func TestReExportedConstants(t *testing.T) {
 		t.Errorf("StatusCancelled = %v, want cancelled", StatusCancelled)
 	}
 
-	// Test plan constants
-	if PlanBasic != "basic" {
-		t.Errorf("PlanBasic = %v, want basic", PlanBasic)
-	}
-	if PlanPro != "pro" {
-		t.Errorf("PlanPro = %v, want pro", PlanPro)
-	}
-	if PlanEnterprise != "enterprise" {
-		t.Errorf("PlanEnterprise = %v, want enterprise", PlanEnterprise)
-	}
-
 	// Test resolver constants
 	if ResolverSubdomain != "subdomain" {
 		t.Errorf("ResolverSubdomain = %v, want subdomain", ResolverSubdomain)
@@ -214,8 +201,8 @@ func TestReExportedConstants(t *testing.T) {
 func TestReExportedFunctions(t *testing.T) {
 	// Test DefaultConfig
 	config := DefaultConfig()
-	if config.Database.Driver != "pgx" {
-		t.Errorf("DefaultConfig().Database.Driver = %v, want pgx", config.Database.Driver)
+	if config.Database.SchemaPrefix != "tenant_" {
+		t.Errorf("DefaultConfig().Database.SchemaPrefix = %v, want tenant_", config.Database.SchemaPrefix)
 	}
 
 	// Test context helper functions
@@ -242,7 +229,6 @@ func TestReExportedFunctions(t *testing.T) {
 		TenantID:   tenantID,
 		Subdomain:  "test",
 		SchemaName: "tenant_test",
-		PlanType:   "basic",
 		Status:     "active",
 	}
 	ctxWithTenantCtx := context.WithValue(ctx, tenant.ContextKeyTenant, tenantCtx)
@@ -311,24 +297,12 @@ func (m *MockMultiTenantManager) ActivateTenant(ctx context.Context, id uuid.UUI
 	return nil
 }
 
-func (m *MockMultiTenantManager) ValidateAccess(ctx context.Context, userID, tenantID uuid.UUID) error {
-	return nil
-}
-
-func (m *MockMultiTenantManager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*tenant.Limits, error) {
-	return &tenant.Limits{}, nil
-}
-
 func (m *MockMultiTenantManager) GetStats(ctx context.Context, tenantID uuid.UUID) (*tenant.Stats, error) {
 	return &tenant.Stats{}, nil
 }
 
 func (m *MockMultiTenantManager) GetTenantConn(ctx context.Context, tenantID uuid.UUID) (*tenant.Conn, error) {
 	return nil, nil
-}
-
-func (m *MockMultiTenantManager) LimitChecker() tenant.LimitChecker {
-	return nil
 }
 
 func (m *MockMultiTenantManager) WithTenantTx(ctx context.Context, tenantID uuid.UUID, fn func(tx *sql.Tx) error) error {
@@ -382,7 +356,7 @@ func TestReExportedErrorTypes(t *testing.T) {
 }
 
 func TestNew_RejectsMissingMigrationsDir(t *testing.T) {
-	config := tenant.DefaultConfig()
+	config := DefaultConfig()
 	config.Database.DSN = "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
 	config.Database.MigrationsDir = filepath.Join(t.TempDir(), "does-not-exist")
 

@@ -23,8 +23,31 @@ type resolver struct {
 	logger     *zap.Logger
 }
 
+// DefaultSubdomainValidator returns the built-in policy: 3-50 characters,
+// lowercase letters, digits and hyphens, not starting or ending with a
+// hyphen, and not in reserved.
+func DefaultSubdomainValidator(reserved []string) func(string) error {
+	return func(subdomain string) error {
+		if len(subdomain) < 3 || len(subdomain) > 50 {
+			return errors.New("subdomain must be between 3 and 50 characters")
+		}
+		if !subdomainPattern.MatchString(subdomain) {
+			return errors.New("subdomain must contain only lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen")
+		}
+		for _, r := range reserved {
+			if strings.EqualFold(subdomain, r) {
+				return fmt.Errorf("subdomain '%s' is reserved", subdomain)
+			}
+		}
+		return nil
+	}
+}
+
 // NewResolver creates a new tenant resolver
 func NewResolver(config ResolverConfig, repository Repository, logger *zap.Logger) Resolver {
+	if config.ValidateSubdomain == nil {
+		config.ValidateSubdomain = DefaultSubdomainValidator(config.ReservedSubdomain)
+	}
 	return &resolver{
 		config:     config,
 		repository: repository,
@@ -175,21 +198,5 @@ func (r *resolver) ExtractFromHeader(req *http.Request) (string, error) {
 
 // ValidateSubdomain validates a subdomain format
 func (r *resolver) ValidateSubdomain(subdomain string) error {
-	if len(subdomain) < 3 || len(subdomain) > 50 {
-		return errors.New("subdomain must be between 3 and 50 characters")
-	}
-
-	// Check for valid characters (alphanumeric and hyphens only)
-	if !subdomainPattern.MatchString(subdomain) {
-		return errors.New("subdomain must contain only lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen")
-	}
-
-	// Check for reserved subdomains
-	for _, reserved := range r.config.ReservedSubdomain {
-		if strings.EqualFold(subdomain, reserved) {
-			return fmt.Errorf("subdomain '%s' is reserved", subdomain)
-		}
-	}
-
-	return nil
+	return r.config.ValidateSubdomain(subdomain)
 }

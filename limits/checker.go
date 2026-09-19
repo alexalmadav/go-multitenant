@@ -1,20 +1,42 @@
-package tenant
+package limits
 
 import (
 	"context"
 	"fmt"
 	"sync"
 
+	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-// LimitChecker provides dynamic limit checking capabilities
-type LimitChecker interface {
+// Enforcer is the narrow interface the HTTP middleware needs.
+type Enforcer interface {
+	// CheckTenant checks every limit of the tenant's plan and returns a
+	// snapshot of those limits. A limit violation is a *tenant.TenantError
+	// with Code LIMIT_EXCEEDED or FEATURE_NOT_ALLOWED. A plan with no
+	// configured limits (including the empty plan) is refused, not
+	// allowed: a *tenant.TenantError with Code PLAN_NOT_CONFIGURED.
+	CheckTenant(ctx context.Context, tenantID uuid.UUID) (FlexibleLimits, error)
+}
+
+// Checker provides dynamic limit checking capabilities.
+//
+// With enforcement on (Config.EnforceLimits), every method that resolves a
+// tenant's plan agrees on an unconfigured plan: CheckLimit, CheckTenant, and
+// CheckAllLimits all return a *tenant.TenantError with Code
+// PLAN_NOT_CONFIGURED rather than allowing the request. Set the tenant's
+// plan with Tenant.SetPlan, or supply a fallback via Config.PlanOf.
+type Checker interface {
+	Enforcer
+
 	// Dynamic limit checking
 	CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName string, currentValue interface{}) error
 	CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUID, def *LimitDefinition, currentValue interface{}) error
 	CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error
+
+	// Usage returns the current count for every limit in Config.UsageTables.
+	Usage(ctx context.Context, tenantID uuid.UUID) (map[string]int, error)
 
 	// Schema management
 	GetLimitSchema() *LimitSchema
@@ -37,20 +59,20 @@ type LimitChecker interface {
 	GetUsageTracker() UsageTracker
 }
 
-// limitChecker implements the LimitChecker interface
-type limitChecker struct {
+// checker implements the Checker interface
+type checker struct {
 	mu           sync.RWMutex
-	config       LimitsConfig
-	repository   Repository
+	config       Config
+	repository   tenant.Repository
 	logger       *zap.Logger
 	schema       *LimitSchema
 	planLimits   map[string]FlexibleLimits
 	usageTracker UsageTracker
 }
 
-// NewLimitChecker creates a new limit checker
-func NewLimitChecker(config LimitsConfig, repository Repository, logger *zap.Logger) LimitChecker {
-	checker := &limitChecker{
+// NewChecker creates a new limit checker
+func NewChecker(config Config, repository tenant.Repository, logger *zap.Logger) Checker {
+	c := &checker{
 		config:     config,
 		repository: repository,
 		logger:     logger.Named("limits"),
@@ -59,44 +81,59 @@ func NewLimitChecker(config LimitsConfig, repository Repository, logger *zap.Log
 	}
 
 	// Use default schema if none provided
-	if checker.schema == nil {
-		checker.schema = DefaultLimitSchema()
+	if c.schema == nil {
+		c.schema = DefaultLimitSchema()
 	}
 
 	// Initialize plan limits if empty
-	if checker.planLimits == nil {
-		checker.planLimits = make(map[string]FlexibleLimits)
+	if c.planLimits == nil {
+		c.planLimits = make(map[string]FlexibleLimits)
 	}
 
-	return checker
+	return c
+}
+
+// planOf resolves the tenant's plan name.
+func (lc *checker) planOf(t *tenant.Tenant) string {
+	if lc.config.PlanOf != nil {
+		return lc.config.PlanOf(t)
+	}
+	return t.Plan()
 }
 
 // CheckLimit validates a specific limit for a tenant
-func (lc *limitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName string, currentValue interface{}) error {
+func (lc *checker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName string, currentValue interface{}) error {
 	if !lc.config.EnforceLimits {
 		return nil
 	}
 
-	// Get tenant to determine plan
-	tenant, err := lc.repository.GetByID(ctx, tenantID)
+	t, err := lc.repository.GetByID(ctx, tenantID)
 	if err != nil {
 		return fmt.Errorf("failed to get tenant: %w", err)
 	}
 
-	// Get plan limits
-	planLimits := lc.GetLimitsForPlan(tenant.PlanType)
+	plan := lc.planOf(t)
+	planLimits := lc.GetLimitsForPlan(plan)
 	if planLimits == nil {
-		lc.logger.Warn("No limits found for plan", zap.String("plan", tenant.PlanType))
-		return nil
+		return &tenant.TenantError{
+			TenantID: t.ID,
+			Code:     "PLAN_NOT_CONFIGURED",
+			Message:  fmt.Sprintf("no limits configured for plan %q", plan),
+		}
 	}
 
-	// Get the specific limit
+	return lc.checkOne(ctx, t, plan, planLimits, limitName, currentValue)
+}
+
+// checkOne validates one limit of an already-loaded tenant against the limits
+// of its plan. A nil currentValue is read from the usage tracker, if any.
+func (lc *checker) checkOne(ctx context.Context, t *tenant.Tenant, plan string, planLimits FlexibleLimits, limitName string, currentValue interface{}) error {
 	limit, exists := planLimits.Get(limitName)
 	if !exists {
 		// If limit doesn't exist in plan, it's not restricted
 		lc.logger.Debug("Limit not defined for plan",
 			zap.String("limit", limitName),
-			zap.String("plan", tenant.PlanType))
+			zap.String("plan", plan))
 		return nil
 	}
 
@@ -107,55 +144,89 @@ func (lc *limitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limi
 
 	// Get current usage if not provided
 	if tracker := lc.GetUsageTracker(); currentValue == nil && tracker != nil {
-		currentValue, err = tracker.GetCurrentUsage(ctx, tenantID, limitName)
+		value, err := tracker.GetCurrentUsage(ctx, t.ID, limitName)
 		if err != nil {
 			lc.logger.Warn("Failed to get current usage, skipping limit check",
-				zap.String("tenant_id", tenantID.String()),
+				zap.String("tenant_id", t.ID.String()),
 				zap.String("limit", limitName),
 				zap.Error(err))
 			return nil
 		}
+		currentValue = value
 	}
 
 	// Perform validation
-	return lc.validateLimit(tenantID, limitName, limit, currentValue)
+	return lc.validateLimit(t.ID, limitName, limit, currentValue)
 }
 
 // CheckLimitByDefinition checks a limit using its definition
-func (lc *limitChecker) CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUID, def *LimitDefinition, currentValue interface{}) error {
+func (lc *checker) CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUID, def *LimitDefinition, currentValue interface{}) error {
 	return lc.CheckLimit(ctx, tenantID, def.Name, currentValue)
 }
 
-// CheckAllLimits validates all limits for a tenant
-func (lc *limitChecker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error {
+// CheckTenant loads the tenant once, checks every limit of its plan, and
+// returns a snapshot of those limits. When enforcement is disabled it returns
+// an empty snapshot without consulting the repository; use
+// GetLimitsForPlan(t.Plan()) for the configured limits. With enforcement on, a
+// plan that has no configured limits is an error.
+func (lc *checker) CheckTenant(ctx context.Context, tenantID uuid.UUID) (FlexibleLimits, error) {
 	if !lc.config.EnforceLimits {
-		return nil
+		return FlexibleLimits{}, nil
 	}
-
-	// Get tenant
-	tenant, err := lc.repository.GetByID(ctx, tenantID)
+	t, err := lc.repository.GetByID(ctx, tenantID)
 	if err != nil {
-		return fmt.Errorf("failed to get tenant: %w", err)
+		return nil, fmt.Errorf("failed to get tenant: %w", err)
 	}
-
-	// Get plan limits
-	planLimits := lc.GetLimitsForPlan(tenant.PlanType)
+	plan := lc.planOf(t)
+	planLimits := lc.GetLimitsForPlan(plan)
 	if planLimits == nil {
-		return fmt.Errorf("no limits found for plan: %s", tenant.PlanType)
-	}
-
-	// Check each limit in the plan
-	for limitName := range planLimits {
-		if err := lc.CheckLimit(ctx, tenantID, limitName, nil); err != nil {
-			return fmt.Errorf("limit check failed for %s: %w", limitName, err)
+		return nil, &tenant.TenantError{
+			TenantID: t.ID,
+			Code:     "PLAN_NOT_CONFIGURED",
+			Message:  fmt.Sprintf("no limits configured for plan %q", plan),
 		}
 	}
+	for name := range planLimits {
+		if err := lc.checkOne(ctx, t, plan, planLimits, name, nil); err != nil {
+			return nil, fmt.Errorf("limit check failed for %s: %w", name, err)
+		}
+	}
+	return planLimits, nil
+}
 
-	return nil
+// CheckAllLimits validates all limits for a tenant. With enforcement off it
+// is a no-op.
+func (lc *checker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error {
+	_, err := lc.CheckTenant(ctx, tenantID)
+	return err
+}
+
+// Usage returns the current count for every limit in Config.UsageTables.
+func (lc *checker) Usage(ctx context.Context, tenantID uuid.UUID) (map[string]int, error) {
+	out := make(map[string]int, len(lc.config.UsageTables))
+	tracker := lc.GetUsageTracker()
+	if tracker == nil {
+		return out, nil
+	}
+	for name := range lc.config.UsageTables {
+		v, err := tracker.GetCurrentUsage(ctx, tenantID, name)
+		if err != nil {
+			return nil, fmt.Errorf("usage for %s: %w", name, err)
+		}
+		switch n := v.(type) {
+		case int:
+			out[name] = n
+		case int64:
+			out[name] = int(n)
+		case float64:
+			out[name] = int(n)
+		}
+	}
+	return out, nil
 }
 
 // validateLimit performs type-specific validation
-func (lc *limitChecker) validateLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
+func (lc *checker) validateLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
 	if currentValue == nil {
 		// No current value to compare, skip validation
 		return nil
@@ -181,7 +252,7 @@ func (lc *limitChecker) validateLimit(tenantID uuid.UUID, limitName string, limi
 	}
 }
 
-func (lc *limitChecker) validateIntLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
+func (lc *checker) validateIntLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
 	limitVal, err := limit.Int()
 	if err != nil {
 		return fmt.Errorf("invalid limit value for %s: %w", limitName, err)
@@ -200,7 +271,7 @@ func (lc *limitChecker) validateIntLimit(tenantID uuid.UUID, limitName string, l
 	}
 
 	if current > limitVal {
-		return &TenantError{
+		return &tenant.TenantError{
 			TenantID: tenantID,
 			Code:     "LIMIT_EXCEEDED",
 			Message:  fmt.Sprintf("Limit exceeded for %s: current=%d, limit=%d", limitName, current, limitVal),
@@ -210,7 +281,7 @@ func (lc *limitChecker) validateIntLimit(tenantID uuid.UUID, limitName string, l
 	return nil
 }
 
-func (lc *limitChecker) validateFloatLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
+func (lc *checker) validateFloatLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
 	limitVal, err := limit.Float()
 	if err != nil {
 		return fmt.Errorf("invalid limit value for %s: %w", limitName, err)
@@ -231,7 +302,7 @@ func (lc *limitChecker) validateFloatLimit(tenantID uuid.UUID, limitName string,
 	}
 
 	if current > limitVal {
-		return &TenantError{
+		return &tenant.TenantError{
 			TenantID: tenantID,
 			Code:     "LIMIT_EXCEEDED",
 			Message:  fmt.Sprintf("Limit exceeded for %s: current=%.2f, limit=%.2f", limitName, current, limitVal),
@@ -241,7 +312,7 @@ func (lc *limitChecker) validateFloatLimit(tenantID uuid.UUID, limitName string,
 	return nil
 }
 
-func (lc *limitChecker) validateStringLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
+func (lc *checker) validateStringLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
 	limitVal, err := limit.String()
 	if err != nil {
 		return fmt.Errorf("invalid limit value for %s: %w", limitName, err)
@@ -255,7 +326,7 @@ func (lc *limitChecker) validateStringLimit(tenantID uuid.UUID, limitName string
 	// String validation can be customized based on the limit name
 	// For now, implement basic length comparison
 	if len(current) > len(limitVal) && limitVal != "unlimited" && limitVal != "" {
-		return &TenantError{
+		return &tenant.TenantError{
 			TenantID: tenantID,
 			Code:     "LIMIT_EXCEEDED",
 			Message:  fmt.Sprintf("String limit exceeded for %s: current length=%d, limit length=%d", limitName, len(current), len(limitVal)),
@@ -265,7 +336,7 @@ func (lc *limitChecker) validateStringLimit(tenantID uuid.UUID, limitName string
 	return nil
 }
 
-func (lc *limitChecker) validateBoolLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
+func (lc *checker) validateBoolLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
 	limitVal, err := limit.Bool()
 	if err != nil {
 		return fmt.Errorf("invalid limit value for %s: %w", limitName, err)
@@ -278,7 +349,7 @@ func (lc *limitChecker) validateBoolLimit(tenantID uuid.UUID, limitName string, 
 
 	// For boolean limits, if limit is false and current usage is true, it's exceeded
 	if !limitVal && current {
-		return &TenantError{
+		return &tenant.TenantError{
 			TenantID: tenantID,
 			Code:     "FEATURE_NOT_ALLOWED",
 			Message:  fmt.Sprintf("Feature not allowed: %s is disabled for this plan", limitName),
@@ -288,7 +359,7 @@ func (lc *limitChecker) validateBoolLimit(tenantID uuid.UUID, limitName string, 
 	return nil
 }
 
-func (lc *limitChecker) validateDurationLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
+func (lc *checker) validateDurationLimit(tenantID uuid.UUID, limitName string, limit *LimitValue, currentValue interface{}) error {
 	_, err := limit.Duration()
 	if err != nil {
 		return fmt.Errorf("invalid limit value for %s: %w", limitName, err)
@@ -304,13 +375,13 @@ func (lc *limitChecker) validateDurationLimit(tenantID uuid.UUID, limitName stri
 
 // Schema management
 
-func (lc *limitChecker) GetLimitSchema() *LimitSchema {
+func (lc *checker) GetLimitSchema() *LimitSchema {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	return lc.schema
 }
 
-func (lc *limitChecker) SetLimitSchema(schema *LimitSchema) {
+func (lc *checker) SetLimitSchema(schema *LimitSchema) {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	lc.schema = schema
@@ -320,7 +391,7 @@ func (lc *limitChecker) SetLimitSchema(schema *LimitSchema) {
 
 // GetLimitsForPlan returns a snapshot of the plan's limits. Mutating the
 // returned map does not affect the checker; use AddLimit/UpdateLimit/RemoveLimit.
-func (lc *limitChecker) GetLimitsForPlan(planType string) FlexibleLimits {
+func (lc *checker) GetLimitsForPlan(planType string) FlexibleLimits {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	limits, ok := lc.planLimits[planType]
@@ -335,7 +406,7 @@ func (lc *limitChecker) GetLimitsForPlan(planType string) FlexibleLimits {
 	return snapshot
 }
 
-func (lc *limitChecker) SetLimitsForPlan(planType string, limits FlexibleLimits) {
+func (lc *checker) SetLimitsForPlan(planType string, limits FlexibleLimits) {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	lc.planLimits[planType] = limits
@@ -343,7 +414,7 @@ func (lc *limitChecker) SetLimitsForPlan(planType string, limits FlexibleLimits)
 
 // Limit management
 
-func (lc *limitChecker) AddLimit(planType, limitName string, limitType LimitType, value interface{}) error {
+func (lc *checker) AddLimit(planType, limitName string, limitType LimitType, value interface{}) error {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 
@@ -380,7 +451,7 @@ func (lc *limitChecker) AddLimit(planType, limitName string, limitType LimitType
 	return nil
 }
 
-func (lc *limitChecker) RemoveLimit(planType, limitName string) error {
+func (lc *checker) RemoveLimit(planType, limitName string) error {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	if planLimits, exists := lc.planLimits[planType]; exists {
@@ -392,7 +463,7 @@ func (lc *limitChecker) RemoveLimit(planType, limitName string) error {
 	return nil
 }
 
-func (lc *limitChecker) UpdateLimit(planType, limitName string, value interface{}) error {
+func (lc *checker) UpdateLimit(planType, limitName string, value interface{}) error {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	planLimits := lc.planLimits[planType]
@@ -418,19 +489,19 @@ func (lc *limitChecker) UpdateLimit(planType, limitName string, value interface{
 
 // Validation
 
-func (lc *limitChecker) ValidateLimits(planType string, limits FlexibleLimits) error {
+func (lc *checker) ValidateLimits(planType string, limits FlexibleLimits) error {
 	return lc.GetLimitSchema().ValidateLimits(limits)
 }
 
 // Usage tracker integration
 
-func (lc *limitChecker) SetUsageTracker(tracker UsageTracker) {
+func (lc *checker) SetUsageTracker(tracker UsageTracker) {
 	lc.mu.Lock()
 	defer lc.mu.Unlock()
 	lc.usageTracker = tracker
 }
 
-func (lc *limitChecker) GetUsageTracker() UsageTracker {
+func (lc *checker) GetUsageTracker() UsageTracker {
 	lc.mu.RLock()
 	defer lc.mu.RUnlock()
 	return lc.usageTracker

@@ -14,16 +14,22 @@ The test suite is organized into several categories:
 
 #### Tenant Package Tests  
 - **`tenant/models_test.go`** - Tests for data models, validation functions, and constants
-- **`tenant/flexible_limits_test.go`** - Tests for the flexible limits system
-- **`tenant/resolver_test.go`** - Tests for tenant resolution from HTTP requests
+- **`tenant/metadata_test.go`** - Tests for `TenantMetadata`, the typed getters/setters, and `Plan()`/`SetPlan()`
+- **`tenant/resolver_test.go`** - Tests for tenant resolution from HTTP requests, including `DefaultSubdomainValidator`
 - **`tenant/manager_test.go`** - Tests for tenant management operations
-- **`tenant/limit_checker_test.go`** - Tests for limit checking and enforcement
+- **`tenant/hooks_test.go`** - Tests for the lifecycle hook event matrix
+
+#### Limits Package Tests
+- **`limits/limits_test.go`** - Tests for `LimitValue`, `FlexibleLimits`, and `LimitSchema`
+- **`limits/checker_test.go`** - Tests for limit checking, plan limit management, and usage tracking (`MockUsageTracker`)
+- **`limits/config_test.go`** - Tests for `Config`/`ExampleConfig`, `PlanOf` resolution, `CheckTenant` with enforcement on and off, and `Usage`
 
 #### Database Package Tests
 - **`database/schema_test.go`** - Schema naming and quoting (pure functions)
 - **`database/migration_manager_test.go`** - Migration file discovery and loading
 
 #### Middleware Tests
+- **`middleware/httpmw/middleware_test.go`** - `net/http` middleware behaviour with stubbed Manager/Resolver/limits.Enforcer (httptest), including `EnforceLimits`'s pass-through-when-unconfigured behaviour
 - **`middleware/gin/middleware_test.go`** - Gin middleware behaviour with stubbed Manager/Resolver (httptest)
 
 ### 2. Integration Tests
@@ -109,62 +115,67 @@ go tool cover -html=coverage.out -o coverage.html
 
 ### 1. Models and Validation (`tenant/models_test.go`)
 
-- **Constants Testing**: Validates status and plan type constants
-- **Validation Functions**: Tests `ValidateStatus()` and `ValidatePlanType()`
+- **Constants Testing**: Validates status constants
+- **Validation Functions**: Tests `ValidateStatus()`
 - **Struct Validation**: Tests tenant data validation
 - **Error Types**: Tests `ValidationError` and `TenantError`
 - **Default Configuration**: Tests `DefaultConfig()` function
 
-### 2. Flexible Limits (`tenant/flexible_limits_test.go`)
+### 2. Metadata and Plan (`tenant/metadata_test.go`)
 
-- **LimitValue Types**: Tests all limit value types (int, float, string, bool, duration)
-- **Type Conversions**: Tests conversion methods and error handling
-- **Unlimited Values**: Tests unlimited value detection
-- **FlexibleLimits Map**: Tests CRUD operations on limits
-- **Type-Safe Getters**: Tests strongly-typed getter methods
+- **TenantMetadata**: Tests JSONB `Value`/`Scan` round-tripping and nil/empty handling
+- **`Plan()` / `SetPlan()`**: Tests reading and writing `metadata["plan"]` (`tenant.PlanKey`) round-trips, including the unset (`""`) case
 
 ### 3. Tenant Resolver (`tenant/resolver_test.go`)
 
 - **Subdomain Resolution**: Tests extracting tenant from subdomains
 - **Path Resolution**: Tests extracting tenant from URL paths
 - **Header Resolution**: Tests extracting tenant from HTTP headers
-- **Validation**: Tests subdomain format validation
+- **Validation**: Tests `DefaultSubdomainValidator` and a custom `ResolverConfig.ValidateSubdomain`
 - **Error Handling**: Tests various error conditions
 
 ### 4. Tenant Manager (`tenant/manager_test.go`)
 
 - **CRUD Operations**: Tests create, read, update, delete operations
-- **Tenant Lifecycle**: Tests provisioning, suspension, activation
-- **Access Validation**: Tests user access validation
-- **Limit Checking**: Tests limit enforcement
+- **Tenant Lifecycle**: Tests provisioning (including resumable provisioning after a failed migration), suspension, activation
+- **Subdomain Validation**: Tests that `CreateTenant` uses the configured `ResolverConfig.ValidateSubdomain`
+- **Stats**: Tests `GetStats` (`TenantID`, `SchemaExists`, `AppliedMigrations`)
 - **Context Management**: Tests tenant context creation
 
-### 5. Limit Checker (`tenant/limit_checker_test.go`)
+### 5. Lifecycle Hooks (`tenant/hooks_test.go`)
 
-- **Limit Enforcement**: Tests various limit types and enforcement
-- **Plan Management**: Tests plan limit configuration
-- **Schema Management**: Tests limit schema operations
-- **Usage Tracking**: Tests usage tracker integration
-- **Validation Logic**: Tests type-specific validation methods
+- **Event Matrix**: Tests every `Hook` method fires for the right `Manager` call (`ValidateMetadata` blocking a write; `OnTenantCreated`/`OnTenantProvisioned`/`OnTenantUpdated`/`OnTenantStatusChanged`/`OnTenantDeleted`)
+- **Failure Semantics**: Tests that after-write hook failures collect into `*tenant.HookError` without rolling back the write
 
-### 6. Schema Manager (`database/schema_test.go`)
+### 6. Limits Package (`limits/limits_test.go`, `limits/checker_test.go`, `limits/config_test.go`)
+
+- **LimitValue Types**: Tests all limit value types (int, float, string, bool, duration) and unlimited detection
+- **FlexibleLimits Map**: Tests CRUD and type-safe getters
+- **Limit Enforcement**: Tests `CheckLimit`/`CheckAllLimits`/`CheckTenant` and type-specific validation
+- **Plan Limit Management**: Tests `AddLimit`/`UpdateLimit`/`RemoveLimit`/`GetLimitsForPlan`
+- **`PlanOf`**: Tests that plan resolution defaults to `t.Plan()` and honors a `Config.PlanOf` override
+- **Enforcement Off**: Tests `CheckTenant` returns an empty snapshot without hitting the repository when `EnforceLimits` is false
+- **Unknown Plan**: Tests `CheckTenant` errors when enforcing against a tenant whose plan has no configured limits
+- **`Usage`**: Tests it reports only configured `UsageTables` limits and returns an error when a tracker read fails (`MockUsageTracker`)
+
+### 7. Schema Manager (`database/schema_test.go`)
 
 - **Schema Naming**: Tests schema name generation and identifier quoting
 - Create/drop/exists/list are covered against a real database in `database_integration_test.go`
 
-### 7. Migration Manager (`database/migration_manager_test.go`)
+### 8. Migration Manager (`database/migration_manager_test.go`)
 
 - **File Operations**: Tests loading migrations from filesystem
 - **File Listing**: Tests discovering migration files
 - Apply, rollback, idempotency and bulk apply are covered against a real database in `database_integration_test.go`
 
-### 8. Middleware (`middleware/gin/middleware_test.go`)
+### 9. Middleware (`middleware/httpmw/middleware_test.go`, `middleware/gin/middleware_test.go`)
 
 - **ResolveTenant**: Skip paths, unresolvable tenant, context population
-- **ValidateTenant**: Status checks and authentication requirement
-- **EnforceLimits**: Limit violations map to 402 `PLAN_LIMIT_EXCEEDED`; other failures to 500
+- **ValidateTenant**: Status checks
+- **EnforceLimits**: Limit violations map to 402 `PLAN_LIMIT_EXCEEDED`; other failures to 500; a nil `limits.Enforcer` (no `Config.Limits`/`WithLimits`) is a pass-through
 
-### 9. Integration Tests (`integration_test.go`, `database_integration_test.go`)
+### 10. Integration Tests (`integration_test.go`, `database_integration_test.go`)
 
 - **Full Lifecycle**: Complete tenant lifecycle with real database
 - **Schema Isolation**: Tenant tables, indexes, functions and triggers live only in the tenant schema
@@ -180,11 +191,10 @@ go tool cover -html=coverage.out -o coverage.html
 
 The test suite includes comprehensive mock implementations:
 
-- **MockRepository**: In-memory tenant data storage
-- **MockSchemaManager**: Mock schema operations
-- **MockMigrationManager**: Mock migration tracking
-- **MockLimitChecker**: Mock limit enforcement
-- **MockUsageTracker**: Mock usage tracking
+- **MockRepository** (`test_helpers.go`): In-memory tenant data storage
+- **MockSchemaManager** (`test_helpers.go`): Mock schema operations
+- **MockMigrationManager** (`test_helpers.go`): Mock migration tracking
+- **MockUsageTracker** (`limits/checker_test.go`): Mock usage tracking for the `limits` package's own tests
 
 ## Test Database Setup
 

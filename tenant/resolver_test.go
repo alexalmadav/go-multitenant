@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -577,5 +578,36 @@ func TestResolver_ExtractFromSubdomain_HonorsConfiguredDomain(t *testing.T) {
 				t.Errorf("ExtractFromSubdomain(%q) = %q, want %q", tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResolver_CustomSubdomainValidator(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+	cfg := ResolverConfig{
+		Strategy:   ResolverHeader,
+		HeaderName: "X-Tenant",
+		ValidateSubdomain: func(s string) error {
+			if s != "ok" {
+				return errors.New("only ok is allowed")
+			}
+			return nil
+		},
+	}
+	r := NewResolver(cfg, &mockRepository{}, logger)
+	if err := r.ValidateSubdomain("ok"); err != nil {
+		t.Errorf("custom validator should accept ok: %v", err)
+	}
+	if err := r.ValidateSubdomain("acme"); err == nil {
+		t.Errorf("custom validator should reject acme")
+	}
+}
+
+func TestDefaultSubdomainValidator(t *testing.T) {
+	v := DefaultSubdomainValidator([]string{"www"})
+	cases := map[string]bool{"acme": true, "ab": false, "www": false, "-bad": false, "Bad": false}
+	for in, ok := range cases {
+		if err := v(in); (err == nil) != ok {
+			t.Errorf("%q: err=%v, want ok=%v", in, err, ok)
+		}
 	}
 }

@@ -48,6 +48,16 @@ Database
 ### Quick Start (net/http)
 
 ```go
+config := multitenant.DefaultConfig()
+config.Database.DSN = "postgres://user:pass@localhost/db?sslmode=disable"
+config.Database.MigrationsDir = "./migrations"
+config.Resolver.Strategy = multitenant.ResolverSubdomain
+config.Resolver.Domain = "myapp.com"
+
+// Limits are opt-in: config.Limits is nil (no enforcement) unless you set it.
+l := limits.ExampleConfig()
+config.Limits = &l
+
 mt, err := multitenant.New(config)
 if err != nil { log.Fatal(err) }
 defer mt.Close()
@@ -85,19 +95,19 @@ api.Use(ginMw.ResolveTenant(), ginMw.ValidateTenant(), ginMw.EnforceLimits(), gi
 
 ```go
 // Configure custom plan limits (-1 means unlimited)
-basic := make(tenant.FlexibleLimits)
-basic.Set("max_users", tenant.LimitTypeInt, 5)
-basic.Set("max_projects", tenant.LimitTypeInt, 10)
-basic.Set("max_storage_gb", tenant.LimitTypeInt, 1)
+basic := make(limits.FlexibleLimits)
+basic.Set("max_users", limits.LimitTypeInt, 5)
+basic.Set("max_projects", limits.LimitTypeInt, 10)
+basic.Set("max_storage_gb", limits.LimitTypeInt, 1)
 
-pro := make(tenant.FlexibleLimits)
-pro.Set("max_users", tenant.LimitTypeInt, 25)
-pro.Set("max_projects", tenant.LimitTypeInt, 100)
-pro.Set("max_storage_gb", tenant.LimitTypeInt, 10)
+pro := make(limits.FlexibleLimits)
+pro.Set("max_users", limits.LimitTypeInt, 25)
+pro.Set("max_projects", limits.LimitTypeInt, 100)
+pro.Set("max_storage_gb", limits.LimitTypeInt, 10)
 
-config.Limits.PlanLimits = map[string]tenant.FlexibleLimits{
-    multitenant.PlanBasic: basic,
-    multitenant.PlanPro:   pro,
+config.Limits.PlanLimits = map[string]limits.FlexibleLimits{
+    limits.PlanBasic: basic,
+    limits.PlanPro:   pro,
 }
 
 // Limits are checked against live counts in the tenant schema. Map each
@@ -105,13 +115,16 @@ config.Limits.PlanLimits = map[string]tenant.FlexibleLimits{
 config.Limits.UsageTables = map[string]string{"max_projects": "projects", "max_users": "tenant_users"}
 
 // Only limits listed here (or served by a custom UsageTracker) are checked.
-// Swap in your own tracker or add limits at runtime:
-mt.Manager.LimitChecker().SetUsageTracker(myTracker)
-mt.Manager.LimitChecker().AddLimit(multitenant.PlanPro, "beta_features", tenant.LimitTypeBool, true)
+// Swap in your own tracker or add limits at runtime through mt.Limits, the
+// limits.Checker built from config.Limits:
+mt.Limits.SetUsageTracker(myTracker)
+mt.Limits.AddLimit(limits.PlanPro, "beta_features", limits.LimitTypeBool, true)
 
-// Create middleware with custom error handling
+// Create middleware with custom error handling. Pass Limits so EnforceLimits
+// checks plan limits instead of being a pass-through.
 ginConfig := ginmiddleware.Config{
     SkipPaths: []string{"/health", "/billing/"},
+    Limits:    mt.Limits,
     ErrorHandler: func(c *gin.Context, err error) {
         if tenantErr, ok := err.(*multitenant.TenantError); ok {
             if tenantErr.Code == "PLAN_LIMIT_EXCEEDED" {
@@ -164,13 +177,12 @@ config.Resolver.HeaderName = "X-Tenant-ID"
 
 ```go
 config.Database = multitenant.DatabaseConfig{
-    Driver:              "pgx",
     DSN:                "postgres://user:pass@localhost/db?sslmode=disable",
     MaxOpenConns:        100,
     MaxIdleConns:        50,
     ConnMaxLifetime:     15 * time.Minute,
     SchemaPrefix:        "tenant_",     // Schema naming: tenant_{uuid}
-    MigrationsTable:     "tenant_migrations",
+    MigrationsDir:       "./migrations",
 }
 ```
 
@@ -186,16 +198,42 @@ config.Resolver = multitenant.ResolverConfig{
 
 ### Limits Configuration
 
+Limits are optional. The core package `multitenant` knows nothing about plans
+or limits; enforcement lives in the separate `limits` package and only runs
+when `config.Limits` is a non-nil `*limits.Config`. Leave it `nil` (the
+`multitenant.DefaultConfig()` default) and `mt.Limits` is `nil` and
+`EnforceLimits()` middleware becomes a pass-through.
+
 ```go
-config.Limits = tenant.LimitsConfig{
+l := limits.Config{
     EnforceLimits: true,
-    DefaultPlan:   multitenant.PlanBasic,
-    PlanLimits: map[string]tenant.FlexibleLimits{
-        multitenant.PlanBasic: basic, // see FLEXIBLE_LIMITS.md
+    PlanLimits: map[string]limits.FlexibleLimits{
+        limits.PlanBasic: basic, // see FLEXIBLE_LIMITS.md
         // ... more plans
     },
+    // Limits are checked against live row counts. Map each limit name to
+    // the tenant-schema table whose row count is its usage.
+    UsageTables: map[string]string{"max_projects": "projects", "max_users": "tenant_users"},
+    // PlanOf resolves a tenant's plan; nil (the default) uses t.Plan(),
+    // i.e. metadata["plan"].
 }
+config.Limits = &l
 ```
+
+`limits.ExampleConfig()` returns a ready-to-use three-plan (`basic`, `pro`,
+`enterprise`) config to copy and adapt.
+
+At runtime, change plan limits through `mt.Limits` (a `limits.Checker`):
+
+```go
+mt.Limits.AddLimit(limits.PlanPro, "beta_features", limits.LimitTypeBool, true)
+usage, err := mt.Limits.Usage(ctx, tenantID) // map[string]int, one entry per UsageTables key
+```
+
+Middleware enforcement follows the same opt-in rule:
+`mt.HTTPMiddleware.EnforceLimits()` is a pass-through unless `Config.Limits`
+was set when `mt.HTTPMiddleware` was built; for the Gin adapter, pass
+`ginmiddleware.Config{Limits: mt.Limits}` to get real enforcement.
 
 ## 🛠️ Middleware
 
@@ -251,7 +289,7 @@ context keys read with `c.Get`:
 | `tenant_id` | tenant UUID string |
 | `tenant_object` | `*tenant.Tenant` |
 | `tenant_conn` | `*tenant.Conn` |
-| `plan_limits` | `*tenant.Limits` |
+| `plan_limits` | `limits.FlexibleLimits`, set only when `Config.Limits` is set |
 
 ```go
 api := r.Group("/api")
@@ -267,6 +305,10 @@ Setting `c.Set("user_id", id)` from a Gin auth middleware still feeds the
 access log — the adapter bridges it onto the request context automatically.
 `tenant.WithUserID` on the request context is the framework-neutral way and
 takes precedence if both are set.
+
+Read the limits stored by `EnforceLimits` with
+`ginmiddleware.GetTenantLimitsFromContext(c) (limits.FlexibleLimits, bool)`;
+the `net/http` equivalent is `limits.FromContext(ctx) (limits.FlexibleLimits, bool)`.
 
 ## 🗄️ Database Operations
 
@@ -349,9 +391,9 @@ tenant := &multitenant.Tenant{
     ID:        uuid.New(),
     Name:      "Acme Corporation",
     Subdomain: "acme",
-    PlanType:  multitenant.PlanPro,
     Status:    multitenant.StatusPending,
 }
+tenant.SetPlan(limits.PlanPro) // set the plan on creation
 
 // Create tenant record
 err := mt.Manager.CreateTenant(ctx, tenant)
@@ -359,6 +401,11 @@ err := mt.Manager.CreateTenant(ctx, tenant)
 // Provision tenant schema
 err = mt.Manager.ProvisionTenant(ctx, tenant.ID)
 ```
+
+`CreateTenant` does not default the plan for you — a tenant created without
+calling `SetPlan` has `Plan() == ""`, and with limit enforcement on,
+`mt.Limits.CheckTenant` (and therefore `EnforceLimits` middleware) errors on
+it as an unknown plan. Always set a plan on creation if you enforce limits.
 
 ### Managing Tenant Status
 
@@ -371,18 +418,8 @@ err := mt.Manager.ActivateTenant(ctx, tenantID)
 
 // Get tenant statistics
 stats, err := mt.Manager.GetStats(ctx, tenantID)
-// Returns: SchemaExists, AppliedMigrations, Usage (per limit in UsageTables)
-```
-
-### Plan Management
-
-```go
-// Update tenant plan
-tenant.PlanType = multitenant.PlanEnterprise
-err := mt.Manager.UpdateTenant(ctx, tenant)
-
-// Check current limits
-limits, err := mt.Manager.CheckLimits(ctx, tenantID)
+// Returns: TenantID, SchemaExists, AppliedMigrations. For limit usage, see
+// mt.Limits.Usage below.
 ```
 
 `UpdateTenant` writes the struct you pass it wholesale — every field, not a
@@ -401,6 +438,22 @@ t.Metadata.SetString("custom_domain", "app.acme.com")
 tenant.NewStripeExtension(t.Metadata).SetCustomerID("cus_123")
 err := mt.Manager.UpdateTenant(ctx, t)
 ```
+
+### Plan
+
+A tenant's plan lives in `Metadata` too, under the `tenant.PlanKey` key
+(`"plan"`), with typed convenience methods:
+
+```go
+t.SetPlan("pro")     // writes metadata["plan"]
+plan := t.Plan()      // reads it back; "" if never set
+err := mt.Manager.UpdateTenant(ctx, t)
+```
+
+The core `tenant` package never interprets the plan string — it is an opaque
+value. Only the optional `limits` package (or your own code) gives it
+meaning, by mapping plan names to `limits.FlexibleLimits` in
+`limits.Config.PlanLimits`.
 
 ### Lifecycle hooks
 
@@ -432,14 +485,10 @@ See `examples/stripe-integration` for a hook that keeps an external system in sy
 
 ### Access Control
 
-```go
-// Validate user access to tenant
-err := mt.Manager.ValidateAccess(ctx, userID, tenantID)
-```
-
-Role and admin-only checks (e.g. "is this user an admin of this tenant") are
-the application's responsibility, not this library's — enforce them in your
-own auth middleware, ahead of the tenant middleware chain.
+This library has no access-validation API. Whether a user may act on a
+tenant at all, and role/admin-only checks (e.g. "is this user an admin of
+this tenant"), are entirely the application's responsibility — enforce them
+in your own auth middleware, ahead of the tenant middleware chain.
 
 ### Input Validation
 
@@ -450,6 +499,11 @@ own auth middleware, ahead of the tenant middleware chain.
 // - Reserved subdomain protection
 // - Format validation
 ```
+
+The check itself is pluggable: `tenant.ResolverConfig.ValidateSubdomain`
+defaults to `tenant.DefaultSubdomainValidator(ReservedSubdomain)` (the rules
+above) but you can set your own `func(subdomain string) error` to change the
+policy.
 
 ## 📊 Monitoring & Logging
 
@@ -472,7 +526,11 @@ own auth middleware, ahead of the tenant middleware chain.
 
 ```go
 stats, err := mt.Manager.GetStats(ctx, tenantID)
-// Returns: SchemaExists, AppliedMigrations, Usage (per limit in UsageTables)
+// Returns: TenantID, SchemaExists, AppliedMigrations
+
+// Limit usage (per limit in config.Limits.UsageTables) comes from the
+// limits checker, not GetStats:
+usage, err := mt.Limits.Usage(ctx, tenantID) // map[string]int; errors if any tracker read fails
 ```
 
 ## 🧪 Testing
@@ -521,20 +579,20 @@ go run .
 
 ```sql
 -- Tenant registry
-CREATE TABLE tenants (
+CREATE TABLE public.tenants (
     id UUID PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     subdomain VARCHAR(255) UNIQUE NOT NULL,
-    plan_type VARCHAR(50) NOT NULL DEFAULT 'basic',
     status VARCHAR(50) NOT NULL DEFAULT 'pending',
     schema_name VARCHAR(255) NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT chk_status CHECK (status IN ('active', 'suspended', 'pending', 'cancelled'))
 );
 
 -- Migration tracking
-CREATE TABLE tenant_migrations (
+CREATE TABLE public.tenant_migrations (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id UUID NOT NULL,
     version VARCHAR(50) NOT NULL,
@@ -542,10 +600,15 @@ CREATE TABLE tenant_migrations (
     applied_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     rollback_sql TEXT,
     checksum VARCHAR(64),
-    FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+    FOREIGN KEY (tenant_id) REFERENCES public.tenants(id) ON DELETE CASCADE,
     UNIQUE(tenant_id, version)
 );
 ```
+
+There is no plan column: the plan lives in `metadata["plan"]` (see
+[Plan](#plan) above). Upgrading an existing v0.7 database? See
+[Upgrading from v0.7](#upgrading-from-v07) below for what happens to the old
+column.
 
 ### Tenant schema
 
@@ -578,7 +641,10 @@ CREATE TABLE projects (
 ## ⬆️ Upgrading from v0.7
 
 v0.8.0 (part 1) replaces the Gin-only middleware with a framework-neutral
-`net/http` core, and moves the Gin integration into its own module.
+`net/http` core, and moves the Gin integration into its own module. v0.8.0
+(part 2) moves plan and limit handling out of the core: the plan now lives in
+tenant metadata, limits are an optional package, and `Manager`/`Config` no
+longer know about either.
 
 - **Gin is now a separate module.** The core package no longer imports Gin.
   If you use the Gin middleware, add the require line:
@@ -629,6 +695,85 @@ v0.8.0 (part 1) replaces the Gin-only middleware with a framework-neutral
 - **Non-breaking:** `ResolveTenant` no longer fetches the tenant twice per
   request.
 
+### Part 2: plan and limits move out of the core
+
+- **`Tenant.PlanType` is gone; the plan lives in metadata.** Use
+  `t.SetPlan("pro")` to set it and `t.Plan()` to read it (backed by
+  `tenant.PlanKey`, `metadata["plan"]`). `New` moves an existing
+  `plan_type` column's values into `metadata["plan"]` once, on first
+  startup after the upgrade (for rows that don't already have a `plan`
+  key). As part of that same one-time step, the column is made nullable
+  with no default and every row's `plan_type` is set to `NULL`, so the
+  move genuinely happens once — later restarts, and tenants created after
+  the upgrade, never have a plan re-derived from the column. The column
+  itself is left in place; nothing reads it after the first startup. Drop
+  it yourself whenever you're ready:
+  ```sql
+  ALTER TABLE public.tenants DROP COLUMN plan_type;
+  ```
+- **`CreateTenant` no longer defaults the plan to `basic`.** A tenant created
+  without calling `SetPlan` has `Plan() == ""`. With limit enforcement on,
+  `CheckTenant` (and `EnforceLimits` middleware) on that tenant returns a
+  `*tenant.TenantError` with code `PLAN_NOT_CONFIGURED` — an empty string is
+  not a configured plan. Call `t.SetPlan(...)` before `CreateTenant` if you
+  enforce limits.
+- **An unconfigured plan under enforcement is now a 403, not a 500.** A
+  tenant whose plan (including the empty plan) has no entry in
+  `limits.Config.PlanLimits` is refused with `PLAN_NOT_CONFIGURED` (HTTP 403
+  via `EnforceLimits`) rather than the opaque `LIMIT_CHECK_FAILED` 500 of
+  earlier v0.8 builds. Fix it by setting the plan on creation with
+  `SetPlan`, or by supplying a fallback via `limits.Config.PlanOf`.
+- **Limits are now an optional package, `limits`.** `FlexibleLimits`,
+  `LimitType`/`LimitTypeInt`/etc., `LimitSchema`, `LimitDefinition`,
+  `UsageTracker`, and the checker itself all moved from `tenant` to `limits`
+  (`tenant.FlexibleLimits` → `limits.FlexibleLimits`, and so on). The plan
+  constants also moved and are now just examples: `multitenant.PlanBasic` →
+  `limits.PlanBasic` (`limits.PlanPro`, `limits.PlanEnterprise`). The core
+  `tenant` package does not know these names; `limits.ExampleConfig()`
+  returns a ready-made three-plan config using them.
+- **`multitenant.Config` is now a struct**, embedding `tenant.Config` with an
+  added `Limits *limits.Config` field, in place of the old `tenant.Config`
+  usage directly. `multitenant.DefaultConfig()` returns it with `Limits: nil`
+  — **no enforcement** — so a v0.7 config that enforced limits silently stops
+  enforcing them after upgrading unless you set `Limits` explicitly:
+  ```go
+  config := multitenant.DefaultConfig()
+  l := limits.ExampleConfig() // or your own limits.Config
+  config.Limits = &l
+  ```
+- **`Manager.CheckLimits`, `Manager.LimitChecker()`, and
+  `Manager.ValidateAccess` are removed.** Use `mt.Limits` (a `limits.Checker`,
+  `nil` when `Config.Limits` is unset) instead of `Manager.LimitChecker()`:
+  `mt.Limits.CheckTenant`, `mt.Limits.AddLimit`, `mt.Limits.Usage`, etc.
+  `ValidateAccess` was already a stub before v0.8; there is no replacement —
+  access control is the application's responsibility (see
+  [Access Control](#access-control) above).
+- **`tenant.NewManager` dropped the limit-checker parameter** and is now
+  `NewManager(config Config, db *sql.DB, repository Repository, schemaManager SchemaManager, migrationMgr MigrationManager, logger *zap.Logger) Manager`
+  (six arguments). If you constructed a `Manager` directly rather than
+  through `multitenant.New`, update the call.
+- **`Stats` lost its `Usage` field.** `mt.Manager.GetStats` now returns only
+  `TenantID`, `SchemaExists`, `AppliedMigrations`. For per-limit usage, call
+  `mt.Limits.Usage(ctx, tenantID)` — note it now returns an error if any
+  configured usage-tracker read fails, where the old `GetStats` silently
+  skipped a failing one.
+- **`limits.Config.EnforceLimits: false` means `CheckTenant` returns an
+  empty snapshot without consulting the repository at all** — no tenant
+  lookup, no plan check. `limits.FromContext` (and the Gin
+  `GetTenantLimitsFromContext`) then yield an empty map, not the plan's
+  configured limits. (`multitenant.Config.Limits == nil` is the more common
+  case and is stricter still: `mt.Limits` itself is `nil`, so there is no
+  checker to call at all.) To read the configured values regardless of
+  enforcement, use `mt.Limits.GetLimitsForPlan(t.Plan())`.
+- **`DatabaseConfig.Driver` and `DatabaseConfig.MigrationsTable` are
+  removed.** The library only ever used pgx, and the migrations table name
+  was never actually configurable; drop these fields from your config.
+- **Subdomain validation is now pluggable.**
+  `tenant.ResolverConfig.ValidateSubdomain` (`func(subdomain string) error`)
+  replaces the old hardcoded check; it defaults to
+  `tenant.DefaultSubdomainValidator(ReservedSubdomain)`, which is the same
+  policy as before. Set it to change the rules.
+
 ## ⬆️ Upgrading from v0.6
 
 v0.6.0 provisioned every tenant schema with hardcoded tables
@@ -658,7 +803,7 @@ tenants that already exist.
     ```
     Adjust the `version`/`name` to match whatever you name your first real
     migration file, so that file is treated as already applied too.
-- **Limits enforcement**: `LimitsConfig.UsageTables` defaults to empty, so
+- **Limits enforcement**: `limits.Config.UsageTables` defaults to empty, so
   `EnforceLimits: true` silently stops enforcing `max_projects`/`max_users`
   (and any other limit) unless you list the table backing it. To keep v0.6
   behaviour:

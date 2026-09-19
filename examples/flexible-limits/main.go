@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/alexalmadav/go-multitenant"
-	"github.com/alexalmadav/go-multitenant/tenant"
+	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -65,121 +65,125 @@ func createCustomConfig() multitenant.Config {
 	// Customize database
 	config.Database.DSN = "postgres://username:password@localhost:5432/flexible_limits_db?sslmode=disable"
 
+	// Start from the example plans and customise them.
+	customLimits := limits.ExampleConfig()
+
 	// Add custom limits to the schema
-	schema := config.Limits.LimitSchema
+	schema := customLimits.LimitSchema
 
 	// Add industry-specific limits
-	schema.AddDefinition(&tenant.LimitDefinition{
+	schema.AddDefinition(&limits.LimitDefinition{
 		Name:         "video_processing_minutes",
 		DisplayName:  "Video Processing Minutes",
 		Description:  "Monthly allowance for video processing",
-		Type:         tenant.LimitTypeInt,
-		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 60},
+		Type:         limits.LimitTypeInt,
+		DefaultValue: &limits.LimitValue{Type: limits.LimitTypeInt, Value: 60},
 		Required:     false,
 		Category:     "media",
 	})
 
-	schema.AddDefinition(&tenant.LimitDefinition{
+	schema.AddDefinition(&limits.LimitDefinition{
 		Name:         "ai_model_calls",
 		DisplayName:  "AI Model API Calls",
 		Description:  "Monthly AI model API call allowance",
-		Type:         tenant.LimitTypeInt,
-		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 1000},
+		Type:         limits.LimitTypeInt,
+		DefaultValue: &limits.LimitValue{Type: limits.LimitTypeInt, Value: 1000},
 		Required:     false,
 		Category:     "ai",
 	})
 
-	schema.AddDefinition(&tenant.LimitDefinition{
+	schema.AddDefinition(&limits.LimitDefinition{
 		Name:         "custom_branding",
 		DisplayName:  "Custom Branding",
 		Description:  "Allow custom branding and white-labeling",
-		Type:         tenant.LimitTypeBool,
-		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeBool, Value: false},
+		Type:         limits.LimitTypeBool,
+		DefaultValue: &limits.LimitValue{Type: limits.LimitTypeBool, Value: false},
 		Required:     false,
 		Category:     "branding",
 	})
 
-	schema.AddDefinition(&tenant.LimitDefinition{
+	schema.AddDefinition(&limits.LimitDefinition{
 		Name:         "data_retention_years",
 		DisplayName:  "Data Retention (Years)",
 		Description:  "How long data is retained in years",
-		Type:         tenant.LimitTypeFloat,
-		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeFloat, Value: 1.0},
+		Type:         limits.LimitTypeFloat,
+		DefaultValue: &limits.LimitValue{Type: limits.LimitTypeFloat, Value: 1.0},
 		Required:     false,
 		Category:     "compliance",
 	})
 
-	schema.AddDefinition(&tenant.LimitDefinition{
+	schema.AddDefinition(&limits.LimitDefinition{
 		Name:         "concurrent_connections",
 		DisplayName:  "Concurrent Connections",
 		Description:  "Maximum concurrent WebSocket connections",
-		Type:         tenant.LimitTypeInt,
-		DefaultValue: &tenant.LimitValue{Type: tenant.LimitTypeInt, Value: 10},
+		Type:         limits.LimitTypeInt,
+		DefaultValue: &limits.LimitValue{Type: limits.LimitTypeInt, Value: 10},
 		Required:     false,
 		Category:     "performance",
 	})
 
 	// Create custom plans with the new limits
-	startupLimits := make(tenant.FlexibleLimits)
-	startupLimits.Set("max_users", tenant.LimitTypeInt, 3)
-	startupLimits.Set("max_projects", tenant.LimitTypeInt, 5)
-	startupLimits.Set("max_storage_gb", tenant.LimitTypeInt, 1)
-	startupLimits.Set("api_calls_per_month", tenant.LimitTypeInt, 5000)
-	startupLimits.Set("video_processing_minutes", tenant.LimitTypeInt, 30)
-	startupLimits.Set("ai_model_calls", tenant.LimitTypeInt, 500)
-	startupLimits.Set("advanced_features", tenant.LimitTypeBool, false)
-	startupLimits.Set("custom_branding", tenant.LimitTypeBool, false)
-	startupLimits.Set("data_retention_years", tenant.LimitTypeFloat, 1.0)
-	startupLimits.Set("concurrent_connections", tenant.LimitTypeInt, 5)
+	startupLimits := make(limits.FlexibleLimits)
+	startupLimits.Set("max_users", limits.LimitTypeInt, 3)
+	startupLimits.Set("max_projects", limits.LimitTypeInt, 5)
+	startupLimits.Set("max_storage_gb", limits.LimitTypeInt, 1)
+	startupLimits.Set("api_calls_per_month", limits.LimitTypeInt, 5000)
+	startupLimits.Set("video_processing_minutes", limits.LimitTypeInt, 30)
+	startupLimits.Set("ai_model_calls", limits.LimitTypeInt, 500)
+	startupLimits.Set("advanced_features", limits.LimitTypeBool, false)
+	startupLimits.Set("custom_branding", limits.LimitTypeBool, false)
+	startupLimits.Set("data_retention_years", limits.LimitTypeFloat, 1.0)
+	startupLimits.Set("concurrent_connections", limits.LimitTypeInt, 5)
 
-	businessLimits := make(tenant.FlexibleLimits)
-	businessLimits.Set("max_users", tenant.LimitTypeInt, 15)
-	businessLimits.Set("max_projects", tenant.LimitTypeInt, 50)
-	businessLimits.Set("max_storage_gb", tenant.LimitTypeInt, 25)
-	businessLimits.Set("api_calls_per_month", tenant.LimitTypeInt, 50000)
-	businessLimits.Set("video_processing_minutes", tenant.LimitTypeInt, 300)
-	businessLimits.Set("ai_model_calls", tenant.LimitTypeInt, 5000)
-	businessLimits.Set("advanced_features", tenant.LimitTypeBool, true)
-	businessLimits.Set("custom_branding", tenant.LimitTypeBool, true)
-	businessLimits.Set("priority_support", tenant.LimitTypeBool, true)
-	businessLimits.Set("data_retention_years", tenant.LimitTypeFloat, 3.0)
-	businessLimits.Set("concurrent_connections", tenant.LimitTypeInt, 25)
+	businessLimits := make(limits.FlexibleLimits)
+	businessLimits.Set("max_users", limits.LimitTypeInt, 15)
+	businessLimits.Set("max_projects", limits.LimitTypeInt, 50)
+	businessLimits.Set("max_storage_gb", limits.LimitTypeInt, 25)
+	businessLimits.Set("api_calls_per_month", limits.LimitTypeInt, 50000)
+	businessLimits.Set("video_processing_minutes", limits.LimitTypeInt, 300)
+	businessLimits.Set("ai_model_calls", limits.LimitTypeInt, 5000)
+	businessLimits.Set("advanced_features", limits.LimitTypeBool, true)
+	businessLimits.Set("custom_branding", limits.LimitTypeBool, true)
+	businessLimits.Set("priority_support", limits.LimitTypeBool, true)
+	businessLimits.Set("data_retention_years", limits.LimitTypeFloat, 3.0)
+	businessLimits.Set("concurrent_connections", limits.LimitTypeInt, 25)
 
-	scaleLimits := make(tenant.FlexibleLimits)
-	scaleLimits.Set("max_users", tenant.LimitTypeInt, -1)    // unlimited
-	scaleLimits.Set("max_projects", tenant.LimitTypeInt, -1) // unlimited
-	scaleLimits.Set("max_storage_gb", tenant.LimitTypeInt, 500)
-	scaleLimits.Set("api_calls_per_month", tenant.LimitTypeInt, -1) // unlimited
-	scaleLimits.Set("video_processing_minutes", tenant.LimitTypeInt, 2000)
-	scaleLimits.Set("ai_model_calls", tenant.LimitTypeInt, 50000)
-	scaleLimits.Set("advanced_features", tenant.LimitTypeBool, true)
-	scaleLimits.Set("custom_branding", tenant.LimitTypeBool, true)
-	scaleLimits.Set("priority_support", tenant.LimitTypeBool, true)
-	scaleLimits.Set("dedicated_support", tenant.LimitTypeBool, true)
-	scaleLimits.Set("custom_integrations", tenant.LimitTypeBool, true)
-	scaleLimits.Set("data_retention_years", tenant.LimitTypeFloat, 7.0)
-	scaleLimits.Set("concurrent_connections", tenant.LimitTypeInt, 100)
+	scaleLimits := make(limits.FlexibleLimits)
+	scaleLimits.Set("max_users", limits.LimitTypeInt, -1)    // unlimited
+	scaleLimits.Set("max_projects", limits.LimitTypeInt, -1) // unlimited
+	scaleLimits.Set("max_storage_gb", limits.LimitTypeInt, 500)
+	scaleLimits.Set("api_calls_per_month", limits.LimitTypeInt, -1) // unlimited
+	scaleLimits.Set("video_processing_minutes", limits.LimitTypeInt, 2000)
+	scaleLimits.Set("ai_model_calls", limits.LimitTypeInt, 50000)
+	scaleLimits.Set("advanced_features", limits.LimitTypeBool, true)
+	scaleLimits.Set("custom_branding", limits.LimitTypeBool, true)
+	scaleLimits.Set("priority_support", limits.LimitTypeBool, true)
+	scaleLimits.Set("dedicated_support", limits.LimitTypeBool, true)
+	scaleLimits.Set("custom_integrations", limits.LimitTypeBool, true)
+	scaleLimits.Set("data_retention_years", limits.LimitTypeFloat, 7.0)
+	scaleLimits.Set("concurrent_connections", limits.LimitTypeInt, 100)
 
 	// Update plan limits
-	config.Limits.PlanLimits = map[string]tenant.FlexibleLimits{
+	customLimits.PlanLimits = map[string]limits.FlexibleLimits{
 		"startup":  startupLimits,
 		"business": businessLimits,
 		"scale":    scaleLimits,
 	}
+	config.Limits = &customLimits
 
 	return config
 }
 
 func demonstrateCustomLimits(mt *multitenant.MultiTenant) {
-	limitChecker := mt.Manager.LimitChecker()
+	limitChecker := mt.Limits
 
 	// Add a runtime custom limit
-	if err := limitChecker.AddLimit("startup", "custom_api_endpoints", tenant.LimitTypeInt, 3); err != nil {
+	if err := limitChecker.AddLimit("startup", "custom_api_endpoints", limits.LimitTypeInt, 3); err != nil {
 		log.Printf("Failed to add custom limit: %v", err)
 	}
 
 	// Add a feature toggle
-	if err := limitChecker.AddLimit("business", "beta_features", tenant.LimitTypeBool, true); err != nil {
+	if err := limitChecker.AddLimit("business", "beta_features", limits.LimitTypeBool, true); err != nil {
 		log.Printf("Failed to add beta features limit: %v", err)
 	}
 
@@ -197,24 +201,24 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 			ID:        uuid.New(),
 			Name:      "Startup Corp",
 			Subdomain: "startup",
-			PlanType:  "startup",
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Business Solutions Inc",
 			Subdomain: "business",
-			PlanType:  "business",
 			Status:    multitenant.StatusActive,
 		},
 		{
 			ID:        uuid.New(),
 			Name:      "Scale Enterprises",
 			Subdomain: "scale",
-			PlanType:  "scale",
 			Status:    multitenant.StatusActive,
 		},
 	}
+	tenants[0].SetPlan("startup")
+	tenants[1].SetPlan("business")
+	tenants[2].SetPlan("scale")
 
 	for _, tenant := range tenants {
 		existing, err := mt.Manager.GetTenantBySubdomain(ctx, tenant.Subdomain)
@@ -230,7 +234,7 @@ func createExampleTenants(mt *multitenant.MultiTenant) error {
 			return err
 		}
 
-		fmt.Printf("Created tenant: %s (%s plan)\n", tenant.Name, tenant.PlanType)
+		fmt.Printf("Created tenant: %s (%s plan)\n", tenant.Name, tenant.Plan())
 	}
 
 	return nil
@@ -311,7 +315,7 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		var req struct {
 			Name      string `json:"name" binding:"required"`
 			Subdomain string `json:"subdomain" binding:"required"`
-			PlanType  string `json:"plan_type" binding:"required"`
+			Plan      string `json:"plan" binding:"required"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -323,9 +327,9 @@ func createTenant(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			ID:        uuid.New(),
 			Name:      req.Name,
 			Subdomain: req.Subdomain,
-			PlanType:  req.PlanType,
 			Status:    multitenant.StatusPending,
 		}
+		tenant.SetPlan(req.Plan)
 
 		if err := mt.Manager.CreateTenant(c.Request.Context(), tenant); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -358,7 +362,7 @@ func getTenantLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		// For demo, we'll simulate getting limits
 		c.JSON(http.StatusOK, gin.H{
 			"tenant_id": tenantID,
-			"plan_type": tenant.PlanType,
+			"plan_type": tenant.Plan(),
 			"limits":    "Would show flexible limits here",
 		})
 	}
@@ -374,7 +378,7 @@ func changeTenantPlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		}
 
 		var req struct {
-			PlanType string `json:"plan_type" binding:"required"`
+			Plan string `json:"plan" binding:"required"`
 		}
 
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -388,8 +392,8 @@ func changeTenantPlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			return
 		}
 
-		oldPlan := tenant.PlanType
-		tenant.PlanType = req.PlanType
+		oldPlan := tenant.Plan()
+		tenant.SetPlan(req.Plan)
 
 		if err := mt.Manager.UpdateTenant(c.Request.Context(), tenant); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -399,7 +403,7 @@ func changeTenantPlan(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		c.JSON(http.StatusOK, gin.H{
 			"message":  "Plan updated successfully",
 			"old_plan": oldPlan,
-			"new_plan": req.PlanType,
+			"new_plan": req.Plan,
 		})
 	}
 }
@@ -419,16 +423,16 @@ func getCurrentLimits(mt *multitenant.MultiTenant) gin.HandlerFunc {
 		// For demo, return simulated limits
 		c.JSON(http.StatusOK, gin.H{
 			"tenant":    tenant.Name,
-			"plan_type": tenant.PlanType,
+			"plan_type": tenant.Plan(),
 			"limits": gin.H{
-				"max_users":                getSimulatedLimit(tenant.PlanType, "max_users"),
-				"max_projects":             getSimulatedLimit(tenant.PlanType, "max_projects"),
-				"api_calls_per_month":      getSimulatedLimit(tenant.PlanType, "api_calls_per_month"),
-				"video_processing_minutes": getSimulatedLimit(tenant.PlanType, "video_processing_minutes"),
-				"ai_model_calls":           getSimulatedLimit(tenant.PlanType, "ai_model_calls"),
-				"advanced_features":        getSimulatedFeature(tenant.PlanType, "advanced_features"),
-				"custom_branding":          getSimulatedFeature(tenant.PlanType, "custom_branding"),
-				"concurrent_connections":   getSimulatedLimit(tenant.PlanType, "concurrent_connections"),
+				"max_users":                getSimulatedLimit(tenant.Plan(), "max_users"),
+				"max_projects":             getSimulatedLimit(tenant.Plan(), "max_projects"),
+				"api_calls_per_month":      getSimulatedLimit(tenant.Plan(), "api_calls_per_month"),
+				"video_processing_minutes": getSimulatedLimit(tenant.Plan(), "video_processing_minutes"),
+				"ai_model_calls":           getSimulatedLimit(tenant.Plan(), "ai_model_calls"),
+				"advanced_features":        getSimulatedFeature(tenant.Plan(), "advanced_features"),
+				"custom_branding":          getSimulatedFeature(tenant.Plan(), "custom_branding"),
+				"concurrent_connections":   getSimulatedLimit(tenant.Plan(), "concurrent_connections"),
 			},
 		})
 	}
@@ -447,7 +451,7 @@ func checkSpecificLimit(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 		// Simulate limit checking
 		allowed := true
-		limitValue := getSimulatedLimit(tenant.PlanType, limitName)
+		limitValue := getSimulatedLimit(tenant.Plan(), limitName)
 		currentUsage := 0 // Would get from usage tracker
 
 		if limitValue > 0 && currentUsage >= limitValue {
@@ -459,7 +463,7 @@ func checkSpecificLimit(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			"allowed":       allowed,
 			"current_value": limitValue,
 			"usage":         currentUsage,
-			"plan":          tenant.PlanType,
+			"plan":          tenant.Plan(),
 		})
 	}
 }
@@ -491,7 +495,7 @@ func consumeLimit(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			"tenant":    tenant.Name,
 			"limit":     limitName,
 			"consumed":  req.Amount,
-			"remaining": getSimulatedLimit(tenant.PlanType, limitName) - req.Amount,
+			"remaining": getSimulatedLimit(tenant.Plan(), limitName) - req.Amount,
 		})
 	}
 }
@@ -506,11 +510,11 @@ func getAvailableFeatures(mt *multitenant.MultiTenant) gin.HandlerFunc {
 			return
 		}
 
-		features := getFeaturesByPlan(tenant.PlanType)
+		features := getFeaturesByPlan(tenant.Plan())
 
 		c.JSON(http.StatusOK, gin.H{
 			"tenant":   tenant.Name,
-			"plan":     tenant.PlanType,
+			"plan":     tenant.Plan(),
 			"features": features,
 		})
 	}
@@ -528,7 +532,7 @@ func getLimitSchema(mt *multitenant.MultiTenant) gin.HandlerFunc {
 
 func addLimitDefinition(mt *multitenant.MultiTenant) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var req tenant.LimitDefinition
+		var req limits.LimitDefinition
 
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

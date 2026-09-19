@@ -261,90 +261,6 @@ func (m *MockMigrationManager) IsMigrationApplied(ctx context.Context, tenantID 
 	return exists, nil
 }
 
-// MockLimitChecker implements tenant.LimitChecker for testing
-type MockLimitChecker struct {
-	config     tenant.LimitsConfig
-	planLimits map[string]tenant.FlexibleLimits
-}
-
-// NewMockLimitChecker creates a new mock limit checker
-func NewMockLimitChecker(config tenant.LimitsConfig) *MockLimitChecker {
-	return &MockLimitChecker{
-		config:     config,
-		planLimits: config.PlanLimits,
-	}
-}
-
-func (m *MockLimitChecker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName string, currentValue interface{}) error {
-	if !m.config.EnforceLimits {
-		return nil
-	}
-	// Simple mock implementation - always pass
-	return nil
-}
-
-func (m *MockLimitChecker) CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUID, def *tenant.LimitDefinition, currentValue interface{}) error {
-	return m.CheckLimit(ctx, tenantID, def.Name, currentValue)
-}
-
-func (m *MockLimitChecker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error {
-	if !m.config.EnforceLimits {
-		return nil
-	}
-	return nil
-}
-
-func (m *MockLimitChecker) GetLimitSchema() *tenant.LimitSchema {
-	return m.config.LimitSchema
-}
-
-func (m *MockLimitChecker) SetLimitSchema(schema *tenant.LimitSchema) {
-	m.config.LimitSchema = schema
-}
-
-func (m *MockLimitChecker) GetLimitsForPlan(planType string) tenant.FlexibleLimits {
-	return m.planLimits[planType]
-}
-
-func (m *MockLimitChecker) SetLimitsForPlan(planType string, limits tenant.FlexibleLimits) {
-	m.planLimits[planType] = limits
-}
-
-func (m *MockLimitChecker) AddLimit(planType, limitName string, limitType tenant.LimitType, value interface{}) error {
-	if m.planLimits[planType] == nil {
-		m.planLimits[planType] = make(tenant.FlexibleLimits)
-	}
-	m.planLimits[planType][limitName] = &tenant.LimitValue{Type: limitType, Value: value}
-	return nil
-}
-
-func (m *MockLimitChecker) RemoveLimit(planType, limitName string) error {
-	if m.planLimits[planType] != nil {
-		delete(m.planLimits[planType], limitName)
-	}
-	return nil
-}
-
-func (m *MockLimitChecker) UpdateLimit(planType, limitName string, value interface{}) error {
-	if m.planLimits[planType] == nil || m.planLimits[planType][limitName] == nil {
-		return errors.New("limit not found")
-	}
-	m.planLimits[planType][limitName].Value = value
-	return nil
-}
-
-func (m *MockLimitChecker) ValidateLimits(planType string, limits tenant.FlexibleLimits) error {
-	return nil
-}
-
-func (m *MockLimitChecker) SetUsageTracker(tracker tenant.UsageTracker) {
-	// Mock implementation
-}
-
-func (m *MockLimitChecker) GetUsageTracker() tenant.UsageTracker {
-	return nil
-}
-
 // TestData provides common test data
 type TestData struct {
 	TenantID      uuid.UUID
@@ -353,7 +269,6 @@ type TestData struct {
 	MockRepo      *MockRepository
 	MockSchema    *MockSchemaManager
 	MockMigration *MockMigrationManager
-	MockLimits    *MockLimitChecker
 }
 
 // NewTestData creates a complete test data setup
@@ -366,13 +281,11 @@ func NewTestData() *TestData {
 	mockRepo := NewMockRepository()
 	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
 	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
 
 	testTenant := &tenant.Tenant{
 		ID:         tenantID,
 		Name:       "Test Tenant",
 		Subdomain:  "test-tenant",
-		PlanType:   tenant.PlanBasic,
 		Status:     tenant.StatusActive,
 		SchemaName: mockSchema.GetSchemaName(tenantID),
 		CreatedAt:  time.Now(),
@@ -386,7 +299,6 @@ func NewTestData() *TestData {
 		MockRepo:      mockRepo,
 		MockSchema:    mockSchema,
 		MockMigration: mockMigration,
-		MockLimits:    mockLimits,
 	}
 }
 
@@ -409,7 +321,6 @@ func AssertTenantEqual(t1, t2 *tenant.Tenant) bool {
 	return t1.ID == t2.ID &&
 		t1.Name == t2.Name &&
 		t1.Subdomain == t2.Subdomain &&
-		t1.PlanType == t2.PlanType &&
 		t1.Status == t2.Status &&
 		t1.SchemaName == t2.SchemaName
 }

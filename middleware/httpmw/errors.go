@@ -44,6 +44,8 @@ func statusForCode(code string) int {
 		return http.StatusForbidden
 	case "PLAN_LIMIT_EXCEEDED":
 		return http.StatusPaymentRequired
+	case "PLAN_NOT_CONFIGURED":
+		return http.StatusForbidden
 	default:
 		return http.StatusInternalServerError
 	}

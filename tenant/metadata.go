@@ -208,3 +208,32 @@ func (be *BrandingExtension) GetCustomDomain() (string, bool) {
 func (be *BrandingExtension) SetCustomDomain(domain string) {
 	be.metadata.SetString(MetadataCustomDomain, domain)
 }
+
+// PlanKey is the metadata key that holds a tenant's plan name. The core
+// stores it and never interprets it; the limits package reads it.
+const PlanKey = "plan"
+
+// Plan returns the tenant's plan name from metadata, or "" if unset.
+func (t *Tenant) Plan() string {
+	if t == nil || t.Metadata == nil {
+		return ""
+	}
+	v, _ := t.Metadata.GetString(PlanKey)
+	return v
+}
+
+// SetPlan stores the plan name in metadata. An empty plan removes the key.
+// A nil receiver is a no-op, matching Plan()'s nil-safety.
+func (t *Tenant) SetPlan(plan string) {
+	if t == nil {
+		return
+	}
+	if t.Metadata == nil {
+		t.Metadata = TenantMetadata{}
+	}
+	if plan == "" {
+		t.Metadata.Remove(PlanKey)
+		return
+	}
+	t.Metadata.SetString(PlanKey, plan)
+}

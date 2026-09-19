@@ -11,7 +11,6 @@ type Tenant struct {
 	ID         uuid.UUID      `json:"id"`
 	Name       string         `json:"name"`
 	Subdomain  string         `json:"subdomain"`
-	PlanType   string         `json:"plan_type"`
 	Status     string         `json:"status"`
 	SchemaName string         `json:"schema_name"`
 	Metadata   TenantMetadata `json:"metadata"`
@@ -24,16 +23,7 @@ type Context struct {
 	TenantID   uuid.UUID `json:"tenant_id"`
 	Subdomain  string    `json:"subdomain"`
 	SchemaName string    `json:"schema_name"`
-	PlanType   string    `json:"plan_type"`
 	Status     string    `json:"status"`
-}
-
-// Limits represents plan-based limits for a tenant (legacy - use FlexibleLimits instead)
-// Deprecated: Use FlexibleLimits for new implementations
-type Limits struct {
-	MaxUsers     int `json:"max_users"`
-	MaxProjects  int `json:"max_projects"`
-	MaxStorageGB int `json:"max_storage_gb"`
 }
 
 // Stats represents usage statistics for a tenant
@@ -41,8 +31,6 @@ type Stats struct {
 	TenantID          uuid.UUID `json:"tenant_id"`
 	SchemaExists      bool      `json:"schema_exists"`
 	AppliedMigrations int       `json:"applied_migrations"`
-	// Usage holds the current count for each limit named in LimitsConfig.UsageTables.
-	Usage map[string]int `json:"usage"`
 }
 
 // Migration represents a tenant migration
@@ -61,20 +49,17 @@ type Migration struct {
 type Config struct {
 	Database DatabaseConfig `json:"database"`
 	Resolver ResolverConfig `json:"resolver"`
-	Limits   LimitsConfig   `json:"limits"`
 	Logger   LoggerConfig   `json:"logger"`
 }
 
 // DatabaseConfig contains database-specific configuration
 type DatabaseConfig struct {
-	Driver          string        `json:"driver"`
 	DSN             string        `json:"dsn"`
 	MaxOpenConns    int           `json:"max_open_conns"`
 	MaxIdleConns    int           `json:"max_idle_conns"`
 	ConnMaxLifetime time.Duration `json:"conn_max_lifetime"`
 	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
 	SchemaPrefix    string        `json:"schema_prefix"`
-	MigrationsTable string        `json:"migrations_table"`
 	MigrationsDir   string        `json:"migrations_dir"`
 }
 
@@ -85,19 +70,11 @@ type ResolverConfig struct {
 	HeaderName        string   `json:"header_name"`
 	PathPrefix        string   `json:"path_prefix"`
 	ReservedSubdomain []string `json:"reserved_subdomains"`
-}
 
-// LimitsConfig contains limit enforcement configuration
-type LimitsConfig struct {
-	EnforceLimits bool                      `json:"enforce_limits"`
-	PlanLimits    map[string]FlexibleLimits `json:"plan_limits"`
-	LimitSchema   *LimitSchema              `json:"limit_schema,omitempty"`
-	DefaultPlan   string                    `json:"default_plan"`
-	// UsageTables maps a limit name to a table in the tenant schema whose row
-	// count is that limit's current usage, e.g. {"max_projects": "projects"}.
-	// Limits not listed here are not checked unless a custom UsageTracker
-	// supplies a value.
-	UsageTables map[string]string `json:"usage_tables"`
+	// ValidateSubdomain decides whether a subdomain is acceptable, both when
+	// resolving requests and when creating or updating tenants. Nil means
+	// DefaultSubdomainValidator(ReservedSubdomain).
+	ValidateSubdomain func(subdomain string) error `json:"-"`
 }
 
 // LoggerConfig contains logging configuration
@@ -137,13 +114,6 @@ const (
 	StatusCancelled = "cancelled"
 )
 
-// Constants for plan types
-const (
-	PlanBasic      = "basic"
-	PlanPro        = "pro"
-	PlanEnterprise = "enterprise"
-)
-
 // Constants for resolver strategies
 const (
 	ResolverSubdomain = "subdomain"
@@ -151,60 +121,22 @@ const (
 	ResolverHeader    = "header"
 )
 
-// DefaultConfig returns a default configuration with flexible limits
+// DefaultConfig returns the core defaults: a connection pool, the
+// subdomain resolver and JSON logging. Limits are not part of the core; see
+// package limits.
 func DefaultConfig() Config {
-	schema := DefaultLimitSchema()
-
-	// Create default plan limits using flexible system
-	basicLimits := make(FlexibleLimits)
-	basicLimits.Set("max_users", LimitTypeInt, 5)
-	basicLimits.Set("max_projects", LimitTypeInt, 10)
-	basicLimits.Set("max_storage_gb", LimitTypeInt, 1)
-	basicLimits.Set("api_calls_per_month", LimitTypeInt, 10000)
-	basicLimits.Set("advanced_features", LimitTypeBool, false)
-
-	proLimits := make(FlexibleLimits)
-	proLimits.Set("max_users", LimitTypeInt, 25)
-	proLimits.Set("max_projects", LimitTypeInt, 100)
-	proLimits.Set("max_storage_gb", LimitTypeInt, 10)
-	proLimits.Set("api_calls_per_month", LimitTypeInt, 100000)
-	proLimits.Set("advanced_features", LimitTypeBool, true)
-	proLimits.Set("priority_support", LimitTypeBool, true)
-
-	enterpriseLimits := make(FlexibleLimits)
-	enterpriseLimits.Set("max_users", LimitTypeInt, -1)    // unlimited
-	enterpriseLimits.Set("max_projects", LimitTypeInt, -1) // unlimited
-	enterpriseLimits.Set("max_storage_gb", LimitTypeInt, 100)
-	enterpriseLimits.Set("api_calls_per_month", LimitTypeInt, -1) // unlimited
-	enterpriseLimits.Set("advanced_features", LimitTypeBool, true)
-	enterpriseLimits.Set("priority_support", LimitTypeBool, true)
-	enterpriseLimits.Set("custom_integrations", LimitTypeBool, true)
-	enterpriseLimits.Set("dedicated_support", LimitTypeBool, true)
-
 	return Config{
 		Database: DatabaseConfig{
-			Driver:          "pgx",
 			MaxOpenConns:    100,
 			MaxIdleConns:    50,
 			ConnMaxLifetime: 15 * time.Minute,
 			ConnMaxIdleTime: 5 * time.Minute,
 			SchemaPrefix:    "tenant_",
-			MigrationsTable: "tenant_migrations",
 			MigrationsDir:   "", // Applications should set this
 		},
 		Resolver: ResolverConfig{
 			Strategy:          ResolverSubdomain,
 			ReservedSubdomain: []string{"www", "api", "admin", "mail", "ftp", "blog", "support", "help"},
-		},
-		Limits: LimitsConfig{
-			EnforceLimits: true,
-			DefaultPlan:   PlanBasic,
-			LimitSchema:   schema,
-			PlanLimits: map[string]FlexibleLimits{
-				PlanBasic:      basicLimits,
-				PlanPro:        proLimits,
-				PlanEnterprise: enterpriseLimits,
-			},
 		},
 		Logger: LoggerConfig{
 			Level:  "info",
@@ -217,16 +149,6 @@ func DefaultConfig() Config {
 func ValidateStatus(status string) bool {
 	switch status {
 	case StatusActive, StatusSuspended, StatusPending, StatusCancelled:
-		return true
-	default:
-		return false
-	}
-}
-
-// ValidatePlanType validates a plan type
-func ValidatePlanType(planType string) bool {
-	switch planType {
-	case PlanBasic, PlanPro, PlanEnterprise:
 		return true
 	default:
 		return false
