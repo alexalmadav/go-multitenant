@@ -502,59 +502,6 @@ func TestManager_ActivateTenant(t *testing.T) {
 	}
 }
 
-func TestManager_ValidateAccess(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	config := DefaultConfig()
-
-	mockRepo := NewMockRepository()
-	mockSchema := NewMockSchemaManager(config.Database.SchemaPrefix)
-	mockMigration := NewMockMigrationManager()
-	mockLimits := NewMockLimitChecker(config.Limits)
-
-	manager := NewManager(config, (*sql.DB)(nil), mockRepo, mockSchema, mockMigration, mockLimits, logger)
-
-	userID := uuid.New()
-	tenantID := uuid.New()
-
-	// Create active tenant
-	activeTenant := &Tenant{
-		ID:        tenantID,
-		Name:      "Active Tenant",
-		Subdomain: "active-tenant",
-		Status:    StatusActive,
-	}
-	mockRepo.tenants[tenantID] = activeTenant
-
-	// Test access to active tenant
-	err := manager.ValidateAccess(context.Background(), userID, tenantID)
-	if err != nil {
-		t.Errorf("ValidateAccess() error = %v, want nil for active tenant", err)
-	}
-
-	// Create suspended tenant
-	suspendedTenantID := uuid.New()
-	suspendedTenant := &Tenant{
-		ID:        suspendedTenantID,
-		Name:      "Suspended Tenant",
-		Subdomain: "suspended-tenant",
-		Status:    StatusSuspended,
-	}
-	mockRepo.tenants[suspendedTenantID] = suspendedTenant
-
-	// Test access to suspended tenant
-	err = manager.ValidateAccess(context.Background(), userID, suspendedTenantID)
-	if err == nil {
-		t.Error("ValidateAccess() should return error for suspended tenant")
-	}
-
-	// Test access to non-existing tenant
-	nonExistentID := uuid.New()
-	err = manager.ValidateAccess(context.Background(), userID, nonExistentID)
-	if err == nil {
-		t.Error("ValidateAccess() should return error for non-existing tenant")
-	}
-}
-
 func TestManager_CheckLimits(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	config := DefaultConfig()
@@ -1002,4 +949,22 @@ func (m *MockManagerLimitChecker) SetUsageTracker(tracker UsageTracker) {
 
 func (m *MockManagerLimitChecker) GetUsageTracker() UsageTracker {
 	return nil
+}
+
+func TestManager_CreateTenantUsesConfiguredSubdomainValidator(t *testing.T) {
+	repo, schema, mig := newManagerMocks()
+	cfg := DefaultConfig()
+	cfg.Resolver.ValidateSubdomain = func(s string) error {
+		if s == "blocked" {
+			return errors.New("blocked by policy")
+		}
+		return nil // permissive otherwise, even for 2-char names
+	}
+	m := NewManager(cfg, nil, repo, schema, mig, &MockManagerLimitChecker{}, zap.NewNop())
+	if err := m.CreateTenant(context.Background(), &Tenant{Name: "T", Subdomain: "ab"}); err != nil {
+		t.Errorf("custom validator should allow 'ab': %v", err)
+	}
+	if err := m.CreateTenant(context.Background(), &Tenant{Name: "T", Subdomain: "blocked"}); err == nil {
+		t.Errorf("custom validator should reject 'blocked'")
+	}
 }

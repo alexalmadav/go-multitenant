@@ -24,7 +24,6 @@ type Manager interface {
 	ActivateTenant(ctx context.Context, id uuid.UUID) error
 
 	// Access and validation
-	ValidateAccess(ctx context.Context, userID, tenantID uuid.UUID) error
 	CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits, error)
 	// LimitChecker exposes the limit checker so applications can add or
 	// adjust limits at runtime and swap the usage tracker.

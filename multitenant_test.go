@@ -308,10 +308,6 @@ func (m *MockMultiTenantManager) ActivateTenant(ctx context.Context, id uuid.UUI
 	return nil
 }
 
-func (m *MockMultiTenantManager) ValidateAccess(ctx context.Context, userID, tenantID uuid.UUID) error {
-	return nil
-}
-
 func (m *MockMultiTenantManager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*tenant.Limits, error) {
 	return &tenant.Limits{}, nil
 }

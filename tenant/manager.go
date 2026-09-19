@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 
 	"github.com/google/uuid"
@@ -28,6 +27,9 @@ type manager struct {
 
 // NewManager creates a new tenant manager
 func NewManager(config Config, db *sql.DB, repository Repository, schemaManager SchemaManager, migrationMgr MigrationManager, limitChecker LimitChecker, logger *zap.Logger) Manager {
+	if config.Resolver.ValidateSubdomain == nil {
+		config.Resolver.ValidateSubdomain = DefaultSubdomainValidator(config.Resolver.ReservedSubdomain)
+	}
 	return &manager{
 		config:        config,
 		db:            db,
@@ -268,24 +270,6 @@ func (m *manager) ActivateTenant(ctx context.Context, id uuid.UUID) error {
 	return m.runHooks("status_changed", func(h Hook) error { return h.OnTenantStatusChanged(ctx, tenant, previous) })
 }
 
-// ValidateAccess validates if a user has access to a tenant
-func (m *manager) ValidateAccess(ctx context.Context, userID, tenantID uuid.UUID) error {
-	// Basic implementation - in practice you'd check user-tenant relationships
-	tenant, err := m.repository.GetByID(ctx, tenantID)
-	if err != nil {
-		return fmt.Errorf("failed to get tenant: %w", err)
-	}
-
-	if tenant.Status != StatusActive {
-		return fmt.Errorf("tenant is not active: status=%s", tenant.Status)
-	}
-
-	// TODO: Add actual user-tenant relationship validation
-	// This would typically involve checking a users table or tenant_users table
-
-	return nil
-}
-
 // CheckLimits validates tenant against plan limits
 func (m *manager) CheckLimits(ctx context.Context, tenantID uuid.UUID) (*Limits, error) {
 	tenant, err := m.repository.GetByID(ctx, tenantID)
@@ -475,21 +459,5 @@ func (m *manager) validateTenant(tenant *Tenant) error {
 
 // validateSubdomain validates a subdomain format
 func (m *manager) validateSubdomain(subdomain string) error {
-	if len(subdomain) < 3 || len(subdomain) > 50 {
-		return fmt.Errorf("subdomain must be between 3 and 50 characters")
-	}
-
-	// Check for valid characters (alphanumeric and hyphens only)
-	if !subdomainPattern.MatchString(subdomain) {
-		return fmt.Errorf("subdomain must contain only lowercase letters, numbers, and hyphens, and cannot start or end with a hyphen")
-	}
-
-	// Check for reserved subdomains
-	for _, reserved := range m.config.Resolver.ReservedSubdomain {
-		if strings.EqualFold(subdomain, reserved) {
-			return fmt.Errorf("subdomain '%s' is reserved", subdomain)
-		}
-	}
-
-	return nil
+	return m.config.Resolver.ValidateSubdomain(subdomain)
 }

@@ -81,6 +81,11 @@ type ResolverConfig struct {
 	HeaderName        string   `json:"header_name"`
 	PathPrefix        string   `json:"path_prefix"`
 	ReservedSubdomain []string `json:"reserved_subdomains"`
+
+	// ValidateSubdomain decides whether a subdomain is acceptable, both when
+	// resolving requests and when creating or updating tenants. Nil means
+	// DefaultSubdomainValidator(ReservedSubdomain).
+	ValidateSubdomain func(subdomain string) error `json:"-"`
 }
 
 // LimitsConfig contains limit enforcement configuration
