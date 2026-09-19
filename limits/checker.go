@@ -14,11 +14,19 @@ import (
 type Enforcer interface {
 	// CheckTenant checks every limit of the tenant's plan and returns a
 	// snapshot of those limits. A limit violation is a *tenant.TenantError
-	// with Code LIMIT_EXCEEDED or FEATURE_NOT_ALLOWED.
+	// with Code LIMIT_EXCEEDED or FEATURE_NOT_ALLOWED. A plan with no
+	// configured limits (including the empty plan) is refused, not
+	// allowed: a *tenant.TenantError with Code PLAN_NOT_CONFIGURED.
 	CheckTenant(ctx context.Context, tenantID uuid.UUID) (FlexibleLimits, error)
 }
 
-// Checker provides dynamic limit checking capabilities
+// Checker provides dynamic limit checking capabilities.
+//
+// With enforcement on (Config.EnforceLimits), every method that resolves a
+// tenant's plan agrees on an unconfigured plan: CheckLimit, CheckTenant, and
+// CheckAllLimits all return a *tenant.TenantError with Code
+// PLAN_NOT_CONFIGURED rather than allowing the request. Set the tenant's
+// plan with Tenant.SetPlan, or supply a fallback via Config.PlanOf.
 type Checker interface {
 	Enforcer
 
@@ -107,8 +115,11 @@ func (lc *checker) CheckLimit(ctx context.Context, tenantID uuid.UUID, limitName
 	plan := lc.planOf(t)
 	planLimits := lc.GetLimitsForPlan(plan)
 	if planLimits == nil {
-		lc.logger.Warn("No limits found for plan", zap.String("plan", plan))
-		return nil
+		return &tenant.TenantError{
+			TenantID: t.ID,
+			Code:     "PLAN_NOT_CONFIGURED",
+			Message:  fmt.Sprintf("no limits configured for plan %q", plan),
+		}
 	}
 
 	return lc.checkOne(ctx, t, plan, planLimits, limitName, currentValue)
@@ -169,7 +180,11 @@ func (lc *checker) CheckTenant(ctx context.Context, tenantID uuid.UUID) (Flexibl
 	plan := lc.planOf(t)
 	planLimits := lc.GetLimitsForPlan(plan)
 	if planLimits == nil {
-		return nil, fmt.Errorf("no limits found for plan: %q", plan)
+		return nil, &tenant.TenantError{
+			TenantID: t.ID,
+			Code:     "PLAN_NOT_CONFIGURED",
+			Message:  fmt.Sprintf("no limits configured for plan %q", plan),
+		}
 	}
 	for name := range planLimits {
 		if err := lc.checkOne(ctx, t, plan, planLimits, name, nil); err != nil {

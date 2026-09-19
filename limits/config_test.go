@@ -3,6 +3,7 @@ package limits
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/alexalmadav/go-multitenant/tenant"
@@ -157,8 +158,55 @@ func TestChecker_CheckTenantUnknownPlanIsErrorWhenEnforcing(t *testing.T) {
 	repo := &memRepo{tenants: map[uuid.UUID]*tenant.Tenant{id: tn}}
 	c := NewChecker(ExampleConfig(), repo, zap.NewNop())
 
-	if _, err := c.CheckTenant(context.Background(), id); err == nil {
-		t.Fatal("an unconfigured plan should be an error while enforcing")
+	_, err := c.CheckTenant(context.Background(), id)
+	var terr *tenant.TenantError
+	if !errors.As(err, &terr) {
+		t.Fatalf("an unconfigured plan should be a *tenant.TenantError while enforcing, got %v", err)
+	}
+	if terr.Code != "PLAN_NOT_CONFIGURED" {
+		t.Errorf("code = %q, want PLAN_NOT_CONFIGURED", terr.Code)
+	}
+	if terr.TenantID != id {
+		t.Errorf("tenant id = %s, want %s", terr.TenantID, id)
+	}
+	if !strings.Contains(terr.Message, "does-not-exist") {
+		t.Errorf("message = %q, want it to name the plan", terr.Message)
+	}
+}
+
+func TestChecker_CheckLimitUnknownPlanIsErrorWhenEnforcing(t *testing.T) {
+	id := uuid.New()
+	tn := &tenant.Tenant{ID: id}
+	tn.SetPlan("does-not-exist")
+	repo := &memRepo{tenants: map[uuid.UUID]*tenant.Tenant{id: tn}}
+	c := NewChecker(ExampleConfig(), repo, zap.NewNop())
+
+	err := c.CheckLimit(context.Background(), id, "max_projects", 1)
+	var terr *tenant.TenantError
+	if !errors.As(err, &terr) {
+		t.Fatalf("CheckLimit with an unconfigured plan should be a *tenant.TenantError while enforcing, got %v", err)
+	}
+	if terr.Code != "PLAN_NOT_CONFIGURED" {
+		t.Errorf("code = %q, want PLAN_NOT_CONFIGURED", terr.Code)
+	}
+}
+
+func TestChecker_CheckLimitAndCheckTenantAgreeOnUnknownPlan(t *testing.T) {
+	id := uuid.New()
+	tn := &tenant.Tenant{ID: id}
+	tn.SetPlan("does-not-exist")
+	repo := &memRepo{tenants: map[uuid.UUID]*tenant.Tenant{id: tn}}
+	c := NewChecker(ExampleConfig(), repo, zap.NewNop())
+
+	limitErr := c.CheckLimit(context.Background(), id, "max_projects", 1)
+	_, tenantErr := c.CheckTenant(context.Background(), id)
+
+	var le, te *tenant.TenantError
+	if !errors.As(limitErr, &le) || !errors.As(tenantErr, &te) {
+		t.Fatalf("both should be *tenant.TenantError, got CheckLimit=%v CheckTenant=%v", limitErr, tenantErr)
+	}
+	if le.Code != te.Code {
+		t.Errorf("CheckLimit code = %q, CheckTenant code = %q, want them to agree", le.Code, te.Code)
 	}
 }
 

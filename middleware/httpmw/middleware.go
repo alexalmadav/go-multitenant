@@ -212,9 +212,12 @@ func enforceLimits(e limits.Enforcer, errorHandler func(http.ResponseWriter, *ht
 					onError(tc.TenantID, err)
 				}
 				var tenantErr *tenant.TenantError
-				if errors.As(err, &tenantErr) && (tenantErr.Code == "LIMIT_EXCEEDED" || tenantErr.Code == "FEATURE_NOT_ALLOWED") {
+				switch {
+				case errors.As(err, &tenantErr) && (tenantErr.Code == "LIMIT_EXCEEDED" || tenantErr.Code == "FEATURE_NOT_ALLOWED"):
 					errorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "PLAN_LIMIT_EXCEEDED", Message: tenantErr.Message})
-				} else {
+				case tenantErr != nil && tenantErr.Code == "PLAN_NOT_CONFIGURED":
+					errorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "PLAN_NOT_CONFIGURED", Message: tenantErr.Message})
+				default:
 					errorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "LIMIT_CHECK_FAILED", Message: "Unable to verify plan limits"})
 				}
 				return

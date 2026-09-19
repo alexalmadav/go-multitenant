@@ -124,6 +124,15 @@ func TestEnforceLimits_UnexpectedErrorReturns500(t *testing.T) {
 	}
 }
 
+func TestEnforceLimits_PlanNotConfiguredReturns403(t *testing.T) {
+	status, body := enforce(t, func(ctx context.Context, id uuid.UUID) (limits.FlexibleLimits, error) {
+		return nil, &tenant.TenantError{TenantID: id, Code: "PLAN_NOT_CONFIGURED", Message: `no limits configured for plan ""`}
+	})
+	if status != http.StatusForbidden || errorCode(body) != "PLAN_NOT_CONFIGURED" {
+		t.Errorf("got %d %v, want 403 PLAN_NOT_CONFIGURED", status, body)
+	}
+}
+
 func TestEnforceLimits_WithinLimitsPassesAndStoresLimits(t *testing.T) {
 	var seen limits.FlexibleLimits
 	allow := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
