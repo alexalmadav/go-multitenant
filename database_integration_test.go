@@ -2438,7 +2438,7 @@ func TestDatabase_UsageTracker_CountsConfiguredTableAndSkipsOthers(t *testing.T)
 	}
 }
 
-func TestDatabase_GetStats_ReportsMigrations(t *testing.T) {
+func TestDatabase_GetStats_ReportsMigrationsAndLimitsUsage(t *testing.T) {
 	tdb := newTestDB(t)
 	defer tdb.close()
 	mt, ids := migrationTestEnv(t, tdb, 1)

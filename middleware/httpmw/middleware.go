@@ -13,6 +13,7 @@ import (
 
 	"github.com/alexalmadav/go-multitenant/limits"
 	"github.com/alexalmadav/go-multitenant/tenant"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -159,9 +160,14 @@ func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 
 // EnforceLimits checks plan limits for the resolved tenant with the enforcer
 // given to New via WithLimits. Without that option it is a pass-through.
-// Requests on a SkipPaths prefix bypass the check.
+// Requests on a SkipPaths prefix bypass the check. Unlike the package
+// function, a failed check is logged with its underlying cause before the
+// response is sanitised.
 func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
-	inner := EnforceLimits(m.limits, m.config.ErrorHandler)
+	inner := enforceLimits(m.limits, m.config.ErrorHandler, func(tenantID uuid.UUID, err error) {
+		m.logger.Error("Plan limits check failed",
+			zap.String("tenant_id", tenantID.String()), zap.Error(err))
+	})
 	return func(next http.Handler) http.Handler {
 		guarded := inner(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -177,7 +183,16 @@ func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
 // EnforceLimits checks the resolved tenant's plan limits with e and stores
 // the checked limits in the context (read them with limits.FromContext).
 // A nil e is a pass-through. A nil errorHandler uses DefaultErrorHandler.
+//
+// The error the client sees is sanitised; nothing is logged. Use the
+// Middleware method, or wrap e, if the cause must reach the operator.
 func EnforceLimits(e limits.Enforcer, errorHandler func(http.ResponseWriter, *http.Request, error)) func(http.Handler) http.Handler {
+	return enforceLimits(e, errorHandler, nil)
+}
+
+// enforceLimits is EnforceLimits plus an optional callback that receives the
+// original, unsanitised error from CheckTenant.
+func enforceLimits(e limits.Enforcer, errorHandler func(http.ResponseWriter, *http.Request, error), onError func(tenantID uuid.UUID, err error)) func(http.Handler) http.Handler {
 	if errorHandler == nil {
 		errorHandler = DefaultErrorHandler
 	}
@@ -193,6 +208,9 @@ func EnforceLimits(e limits.Enforcer, errorHandler func(http.ResponseWriter, *ht
 			}
 			checked, err := e.CheckTenant(r.Context(), tc.TenantID)
 			if err != nil {
+				if onError != nil {
+					onError(tc.TenantID, err)
+				}
 				var tenantErr *tenant.TenantError
 				if errors.As(err, &tenantErr) && (tenantErr.Code == "LIMIT_EXCEEDED" || tenantErr.Code == "FEATURE_NOT_ALLOWED") {
 					errorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "PLAN_LIMIT_EXCEEDED", Message: tenantErr.Message})

@@ -154,8 +154,14 @@ func (lc *checker) CheckLimitByDefinition(ctx context.Context, tenantID uuid.UUI
 }
 
 // CheckTenant loads the tenant once, checks every limit of its plan, and
-// returns a snapshot of those limits.
+// returns a snapshot of those limits. When enforcement is disabled it returns
+// an empty snapshot without consulting the repository; use
+// GetLimitsForPlan(t.Plan()) for the configured limits. With enforcement on, a
+// plan that has no configured limits is an error.
 func (lc *checker) CheckTenant(ctx context.Context, tenantID uuid.UUID) (FlexibleLimits, error) {
+	if !lc.config.EnforceLimits {
+		return FlexibleLimits{}, nil
+	}
 	t, err := lc.repository.GetByID(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get tenant: %w", err)
@@ -165,9 +171,6 @@ func (lc *checker) CheckTenant(ctx context.Context, tenantID uuid.UUID) (Flexibl
 	if planLimits == nil {
 		return nil, fmt.Errorf("no limits found for plan: %q", plan)
 	}
-	if !lc.config.EnforceLimits {
-		return planLimits, nil
-	}
 	for name := range planLimits {
 		if err := lc.checkOne(ctx, t, plan, planLimits, name, nil); err != nil {
 			return nil, fmt.Errorf("limit check failed for %s: %w", name, err)
@@ -176,7 +179,8 @@ func (lc *checker) CheckTenant(ctx context.Context, tenantID uuid.UUID) (Flexibl
 	return planLimits, nil
 }
 
-// CheckAllLimits validates all limits for a tenant
+// CheckAllLimits validates all limits for a tenant. With enforcement off it
+// is a no-op.
 func (lc *checker) CheckAllLimits(ctx context.Context, tenantID uuid.UUID) error {
 	_, err := lc.CheckTenant(ctx, tenantID)
 	return err

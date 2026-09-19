@@ -113,6 +113,82 @@ func TestChecker_UsageReportsConfiguredLimitsOnly(t *testing.T) {
 	}
 }
 
+// panicRepo fails the test if the checker consults the repository.
+type panicRepo struct{ t *testing.T }
+
+func (r panicRepo) Create(context.Context, *tenant.Tenant) error { return nil }
+func (r panicRepo) GetByID(context.Context, uuid.UUID) (*tenant.Tenant, error) {
+	r.t.Error("repository must not be consulted with enforcement off")
+	return nil, errors.New("must not be called")
+}
+func (r panicRepo) GetBySubdomain(context.Context, string) (*tenant.Tenant, error) {
+	return nil, errors.New("not found")
+}
+func (r panicRepo) Update(context.Context, *tenant.Tenant) error { return nil }
+func (r panicRepo) Delete(context.Context, uuid.UUID) error      { return nil }
+func (r panicRepo) List(context.Context, int, int) ([]*tenant.Tenant, int, error) {
+	return nil, 0, nil
+}
+func (r panicRepo) FindByMetadata(context.Context, string, string) ([]*tenant.Tenant, error) {
+	return nil, nil
+}
+
+func TestChecker_CheckTenantWithEnforcementOffReturnsEmptyWithoutRepo(t *testing.T) {
+	cfg := ExampleConfig()
+	cfg.EnforceLimits = false
+	c := NewChecker(cfg, panicRepo{t}, zap.NewNop())
+
+	got, err := c.CheckTenant(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("CheckTenant with enforcement off: %v", err)
+	}
+	if got == nil || got.Len() != 0 {
+		t.Errorf("want an empty snapshot, got %v", got)
+	}
+	if err := c.CheckAllLimits(context.Background(), uuid.New()); err != nil {
+		t.Errorf("CheckAllLimits with enforcement off: %v", err)
+	}
+}
+
+func TestChecker_CheckTenantUnknownPlanIsErrorWhenEnforcing(t *testing.T) {
+	id := uuid.New()
+	tn := &tenant.Tenant{ID: id}
+	tn.SetPlan("does-not-exist")
+	repo := &memRepo{tenants: map[uuid.UUID]*tenant.Tenant{id: tn}}
+	c := NewChecker(ExampleConfig(), repo, zap.NewNop())
+
+	if _, err := c.CheckTenant(context.Background(), id); err == nil {
+		t.Fatal("an unconfigured plan should be an error while enforcing")
+	}
+}
+
+type failingUsage struct{ err error }
+
+func (u failingUsage) GetCurrentUsage(context.Context, uuid.UUID, string) (interface{}, error) {
+	return nil, u.err
+}
+func (failingUsage) IncrementUsage(context.Context, uuid.UUID, string, interface{}) error {
+	return nil
+}
+func (failingUsage) DecrementUsage(context.Context, uuid.UUID, string, interface{}) error {
+	return nil
+}
+func (failingUsage) ResetUsage(context.Context, uuid.UUID, string) error { return nil }
+
+func TestChecker_UsageReturnsErrorWhenTrackerFails(t *testing.T) {
+	boom := errors.New("count failed")
+	c := NewChecker(ExampleConfig(), &memRepo{tenants: map[uuid.UUID]*tenant.Tenant{}}, zap.NewNop())
+	c.SetUsageTracker(failingUsage{boom})
+
+	usage, err := c.Usage(context.Background(), uuid.New())
+	if !errors.Is(err, boom) {
+		t.Fatalf("Usage error = %v, want it to wrap %v", err, boom)
+	}
+	if usage != nil {
+		t.Errorf("Usage should return no map on error, got %v", usage)
+	}
+}
+
 func TestContext_LimitsRoundTrip(t *testing.T) {
 	l := FlexibleLimits{}
 	l.Set("max_projects", LimitTypeInt, 3)

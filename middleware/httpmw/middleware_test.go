@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/alexalmadav/go-multitenant/limits"
@@ -159,7 +160,7 @@ func TestEnforceLimits_NilEnforcerPassesThrough(t *testing.T) {
 	}
 }
 
-func TestStandard_WithoutLimitsOptionSkipsEnforcement(t *testing.T) {
+func TestEnforceLimits_WithoutOptionPassesThrough(t *testing.T) {
 	id := uuid.New()
 	mgr := &stubManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}
 	mw := New(mgr, resolveTo(id), zap.NewNop(), Config{}) // no WithLimits
@@ -168,6 +169,31 @@ func TestStandard_WithoutLimitsOptionSkipsEnforcement(t *testing.T) {
 	h := Chain(okHandler(), mw.ResolveTenant(), mw.ValidateTenant(), mw.EnforceLimits())
 	if status, _ := serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil)); status != http.StatusOK {
 		t.Errorf("status = %d", status)
+	}
+}
+
+func TestEnforceLimits_MethodLogsTheUnderlyingCause(t *testing.T) {
+	core, logs := observer.New(zapcore.ErrorLevel)
+	id := uuid.New()
+	broken := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return nil, errors.New("db down")
+	}}
+	mw := New(&stubManager{}, nil, zap.New(core), Config{}, WithLimits(broken))
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), mw.EnforceLimits())
+	status, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/", nil))
+	if status != http.StatusInternalServerError || errorCode(body) != "LIMIT_CHECK_FAILED" {
+		t.Fatalf("got %d %v, want 500 LIMIT_CHECK_FAILED", status, body)
+	}
+	entries := logs.FilterMessage("Plan limits check failed").All()
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+	f := entries[0].ContextMap()
+	if got, _ := f["error"].(string); !strings.Contains(got, "db down") {
+		t.Errorf("logged error = %v, want it to mention the cause", f["error"])
+	}
+	if f["tenant_id"] != id.String() {
+		t.Errorf("tenant_id = %v, want %s", f["tenant_id"], id)
 	}
 }
 
