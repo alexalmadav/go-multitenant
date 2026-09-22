@@ -779,7 +779,10 @@ func TestRequireMembershipPassesSkippedPathsThrough(t *testing.T) {
 }
 
 // Standard omits the check when no Membership was configured, so the
-// convenience bundle never silently denies everything.
+// convenience bundle never silently denies everything. The request carries no
+// principal at all, so a Standard that enforced membership would stop it with
+// USER_NOT_AUTHENTICATED. Instead it must run the whole chain and reach
+// SetTenantDB, which fails only because this test has no database.
 func TestStandardOmitsMembershipWhenUnconfigured(t *testing.T) {
 	id := uuid.New()
 	mgr := &stubManager{
@@ -790,12 +793,13 @@ func TestStandardOmitsMembershipWhenUnconfigured(t *testing.T) {
 	}
 	mw := New(mgr, resolveTo(id), zap.NewNop(), Config{})
 
-	code, _ := serve(t, mw.Standard()(okHandler()), httptest.NewRequest(http.MethodGet, "/x", nil))
+	code, body := serve(t, mw.Standard()(okHandler()), httptest.NewRequest(http.MethodGet, "/x", nil))
 
-	// SetTenantDB fails for want of a database, which proves the chain got
-	// past ValidateTenant without demanding a principal.
-	if code == http.StatusUnauthorized {
-		t.Error("Standard demanded a principal without WithMembership")
+	if code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want %d", code, http.StatusInternalServerError)
+	}
+	if got := errorCode(body); got != "DATABASE_ERROR" {
+		t.Errorf("code = %q, want DATABASE_ERROR - the chain stopped before SetTenantDB", got)
 	}
 }
 
@@ -997,32 +1001,26 @@ Create `membership_wiring_test.go` in the repo root:
 ```go
 package multitenant
 
-import (
-	"testing"
+import "testing"
 
-	"github.com/alexalmadav/go-multitenant/tenant"
-)
-
-// The Membership an application configures must reach the middleware. New
-// needs a database, so assert on the config plumbing instead: a Membership
-// set on Config is the value New forwards to httpmw.WithMembership.
-func TestConfigCarriesMembership(t *testing.T) {
-	cfg := DefaultConfig()
-	if cfg.Membership != nil {
-		t.Error("DefaultConfig set a Membership; it must default to nil")
-	}
-
-	cfg.Membership = tenant.ClaimMembership("org_id")
-	if cfg.Membership == nil {
-		t.Error("Config.Membership did not hold the value assigned to it")
+// Membership must default to nil. A non-nil default would turn enforcement on
+// for every application that never asked for it, and Standard would then
+// reject callers that carry no principal.
+//
+// That a configured value reaches the middleware is covered by httpmw's
+// TestStandardEnforcesMembershipWhenConfigured; asserting it through New
+// would need a live database.
+func TestDefaultConfigHasNoMembership(t *testing.T) {
+	if got := DefaultConfig().Membership; got != nil {
+		t.Errorf("DefaultConfig().Membership = %v, want nil", got)
 	}
 }
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `go test . -run TestConfigCarriesMembership -v`
-Expected: FAIL — compilation error, `cfg.Membership undefined`.
+Run: `go test . -run TestDefaultConfigHasNoMembership -v`
+Expected: FAIL — compilation error, `DefaultConfig().Membership undefined`.
 
 - [ ] **Step 3: Add the config field**
 
@@ -1048,7 +1046,7 @@ In `multitenant.go`, immediately after the `if config.Limits != nil { ... }` blo
 
 - [ ] **Step 5: Run the test to verify it passes**
 
-Run: `go test . -run TestConfigCarriesMembership -v`
+Run: `go test . -run TestDefaultConfigHasNoMembership -v`
 Expected: PASS.
 
 - [ ] **Step 6: Rewrite the README's middleware list**
