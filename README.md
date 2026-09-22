@@ -54,6 +54,11 @@ config.Database.MigrationsDir = "./migrations"
 config.Resolver.Strategy = multitenant.ResolverSubdomain
 config.Resolver.Domain = "myapp.com"
 
+// New requires you to decide whether callers are checked against the tenant
+// they reach. This quick start has no auth, so it opts out on the record; set
+// config.Membership before serving real traffic (see Access Control).
+config.InsecureSkipMembership = true
+
 // Limits are opt-in: config.Limits is nil (no enforcement) unless you set it.
 l := limits.ExampleConfig()
 config.Limits = &l
@@ -88,6 +93,7 @@ ginMw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), gi
     SkipPaths: []string{"/health"},
 })
 api := r.Group("/api")
+// Add ginMw.RequireMembership() once you have auth; see Access Control below.
 api.Use(ginMw.ResolveTenant(), ginMw.ValidateTenant(), ginMw.EnforceLimits(), ginMw.SetTenantDB())
 ```
 
@@ -239,38 +245,42 @@ was set when `mt.HTTPMiddleware` was built; for the Gin adapter, pass
 
 ### Available Middleware
 
-`mt.HTTPMiddleware` (package `httpmw`, `net/http`) provides five middlewares:
+`mt.HTTPMiddleware` (package `httpmw`, `net/http`) provides six middlewares:
 
 ```go
-mt.HTTPMiddleware.ResolveTenant()    // Resolves tenant from request
-mt.HTTPMiddleware.ValidateTenant()   // Validates tenant status
-mt.HTTPMiddleware.EnforceLimits()    // Enforces plan limits
-mt.HTTPMiddleware.SetTenantDB()      // Sets up tenant database context
-mt.HTTPMiddleware.LogAccess()        // Logs tenant access
+mt.HTTPMiddleware.ResolveTenant()      // Resolves tenant from request
+mt.HTTPMiddleware.ValidateTenant()     // Validates tenant status
+mt.HTTPMiddleware.RequireMembership()  // Checks the caller belongs to the tenant
+mt.HTTPMiddleware.EnforceLimits()      // Enforces plan limits
+mt.HTTPMiddleware.SetTenantDB()        // Sets up tenant database context
+mt.HTTPMiddleware.LogAccess()          // Logs tenant access
 ```
 
-Access and role checks (e.g. requiring admin privileges) are the
-application's concern, not this library's — put your own auth middleware
-ahead of these in the chain. To have the authenticated user show up as
-`user_id` in `LogAccess`'s output, call `tenant.WithUserID` on the request
-context from that middleware before the request reaches `LogAccess`.
+This library authenticates nobody. Put your own auth middleware ahead of these
+in the chain and have it call `tenant.WithPrincipal` (or `tenant.WithUserID`,
+its subject-only shorthand) on the request context. `LogAccess` reads the
+subject, and `RequireMembership` authorises it.
 
 ### Middleware Chain Example
 
 ```go
 handler := httpmw.Chain(mux,
-    authMiddleware,                      // Your auth middleware; sets tenant.WithUserID
-    mt.HTTPMiddleware.ResolveTenant(),   // Resolve tenant
-    mt.HTTPMiddleware.ValidateTenant(),  // Validate tenant status
-    mt.HTTPMiddleware.EnforceLimits(),   // Check limits
-    mt.HTTPMiddleware.SetTenantDB(),     // Set database context
-    mt.HTTPMiddleware.LogAccess(),       // Log access
+    authMiddleware,                         // Your auth middleware; sets tenant.WithUserID
+    mt.HTTPMiddleware.ResolveTenant(),      // Resolve tenant
+    mt.HTTPMiddleware.ValidateTenant(),     // Validate tenant status
+    mt.HTTPMiddleware.RequireMembership(),  // Authorise the caller for this tenant
+    mt.HTTPMiddleware.EnforceLimits(),      // Check limits
+    mt.HTTPMiddleware.SetTenantDB(),        // Set database context
+    mt.HTTPMiddleware.LogAccess(),          // Log access
 )
 ```
 
 Or use `mt.HTTPMiddleware.Standard()` — `ResolveTenant`, `ValidateTenant`,
-`EnforceLimits` and `SetTenantDB` chained as a single
-`func(http.Handler) http.Handler` (see [Quick Start](#quick-start-nethttp)):
+`RequireMembership`, `EnforceLimits` and `SetTenantDB` chained as a single
+`func(http.Handler) http.Handler` (see [Quick Start](#quick-start-nethttp)).
+`RequireMembership` is included only when a `Membership` is configured, so the
+bundle never denies every request because an option was forgotten; apply
+`RequireMembership` by hand for the fail-closed behaviour:
 
 ```go
 handler := mt.HTTPMiddleware.Standard()(mux)
@@ -278,7 +288,7 @@ handler := mt.HTTPMiddleware.Standard()(mux)
 
 ### Gin
 
-The [Gin adapter](./middleware/gin) wraps the same five middlewares under the
+The [Gin adapter](./middleware/gin) wraps the same six middlewares under the
 same method names. It stores every value both in the request context (read
 with package `tenant`'s helpers) and, for code that prefers it, under Gin
 context keys read with `c.Get`:
@@ -296,10 +306,15 @@ api := r.Group("/api")
 api.Use(authMiddleware())                  // Your auth middleware; sets tenant.WithUserID
 api.Use(ginMw.ResolveTenant())             // Resolve tenant
 api.Use(ginMw.ValidateTenant())            // Validate tenant status
+api.Use(ginMw.RequireMembership())         // Authorise the caller for this tenant
 api.Use(ginMw.EnforceLimits())             // Check limits
 api.Use(ginMw.SetTenantDB())               // Set database context
 api.Use(ginMw.LogAccess())                 // Log access
 ```
+
+The adapter has no `Standard()` and bundles nothing: setting
+`Config.Membership` alone enforces nothing, so `RequireMembership()` has to be
+in the chain above or the check never runs.
 
 Setting `c.Set("user_id", id)` from a Gin auth middleware still feeds the
 access log — the adapter bridges it onto the request context automatically.
@@ -485,10 +500,116 @@ See `examples/stripe-integration` for a hook that keeps an external system in sy
 
 ### Access Control
 
-This library has no access-validation API. Whether a user may act on a
-tenant at all, and role/admin-only checks (e.g. "is this user an admin of
-this tenant"), are entirely the application's responsibility — enforce them
-in your own auth middleware, ahead of the tenant middleware chain.
+Resolving a tenant is not the same as being entitled to it. Without a
+membership check, a caller authenticated at `acme.app.com` can send the same
+credential to `globex.app.com` and be scoped to Globex's schema.
+
+`Membership` is the one authorization decision this library makes, and you
+supply it:
+
+```go
+type Membership interface {
+    Allow(ctx context.Context, subject string, tenantID uuid.UUID) error
+}
+```
+
+When the tenant is already named in the token — Auth0 `org_id`, Clerk
+`org_slug`, WorkOS `organization_id` — no query is needed. The claim may hold
+one value or a list, and may name the tenant by id or by subdomain:
+
+```go
+cfg.Membership = tenant.ClaimMembership("org_id")
+```
+
+When the answer lives in your own database, close over it:
+
+```go
+cfg.Membership = tenant.MembershipFunc(func(ctx context.Context, subject string, id uuid.UUID) error {
+    var ok bool
+    err := db.QueryRowContext(ctx,
+        `SELECT EXISTS (SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id = $2)`,
+        subject, id).Scan(&ok)
+    if err != nil {
+        return err
+    }
+    if !ok {
+        return tenant.ErrNotMember
+    }
+    return nil
+})
+```
+
+The library owns no membership table: your identity provider or your own
+schema already holds that, with your own subject type, and a second copy would
+only drift.
+
+`multitenant.New` **will not choose for you**. It returns an error unless the
+`Config` sets either a `Membership` or `InsecureSkipMembership: true`, and it
+refuses both at once. A forgotten option therefore breaks startup rather than
+isolation, and running without the check is always written down:
+
+```go
+cfg.InsecureSkipMembership = true // any caller reaching a tenant's origin reaches its data
+```
+
+`New` logs a warning at startup when the opt-out is set.
+
+Below `New`, the rule is the same in spirit. `RequireMembership` **fails
+closed**: applied with no `Membership` configured, it denies every request
+rather than passing them through, because a missed limit check costs money
+while a missed membership check serves one tenant's data to another.
+`httpmw.Standard()` includes the check only when a `Membership` is configured.
+If you assemble `httpmw.New` or the Gin adapter yourself rather than going
+through `multitenant.New`, the startup requirement does not apply, so add
+`RequireMembership()` to your chain deliberately.
+
+Role and permission checks stay yours — the library has no role model.
+
+Authentication itself is unaffected by tenancy in the common case: keep your
+users in `public`, give Goth, Authboss, go-pkgz/auth or golang-jwt a plain
+`*sql.DB`, and let tenancy enter only at `RequireMembership`:
+
+```go
+handler := httpmw.Chain(mux,
+    authMiddleware,                        // yours; calls tenant.WithPrincipal
+    mt.HTTPMiddleware.ResolveTenant(),
+    mt.HTTPMiddleware.RequireMembership(),
+    mt.HTTPMiddleware.SetTenantDB(),
+)
+```
+
+If your login lives on its own origin, list it in `Config.SkipHosts` so
+`ResolveTenant` does not try to resolve a tenant there:
+
+```go
+httpmw.Config{SkipHosts: []string{"auth.app.com"}}
+```
+
+The request host is chosen by the client and `net/http`'s `ServeMux` does not
+route on it, so only use `SkipHosts` where the front door pins the Host —
+virtual-host routing, or a proxy that rejects unknown ones — and make sure the
+handlers reachable on a skipped origin tolerate an absent tenant context.
+
+Two cases need more than the above, and are described in
+`docs/superpowers/specs/2026-09-21-membership-design.md`:
+
+- **Users inside the tenant schema.** The auth library's storer must resolve
+  the tenant per call, so its storage interface has to take a
+  `context.Context` — Authboss's `ServerStorer.Load(ctx, key)` does,
+  go-pkgz/auth's `CredChecker.Check(user, password)` does not. Note that
+  `tenant.Conn` is not `*sql.DB`-shaped: `QueryContext` returns `*tenant.Rows`
+  because the pooler-safe `SET LOCAL` design needs something to own and commit
+  the wrapping transaction. Write such storers against `*tenant.Conn`.
+- **Per-tenant auth configuration** (tenant A on Okta, tenant B on Google).
+  Needs one auth-library instance per tenant, cached. Goth forces this when
+  tenants bring their own OAuth apps, because `goth.UseProviders` and
+  `gothic.Store` are package-level globals.
+
+Two things bite regardless: a session cookie scoped to `.app.com` gives
+cross-tenant SSO but reaches every tenant subdomain and rules out the
+`__Host-` prefix; and OAuth redirect URIs must be pre-registered, with
+wildcard subdomains mostly unsupported, so the callback belongs on one origin
+with the tenant carried in the `state` parameter.
 
 ### Input Validation
 
@@ -637,6 +758,37 @@ CREATE TABLE projects (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+## ⬆️ Upgrading from v0.8
+
+v0.9.0 adds a membership check: resolving a tenant from a request is no longer
+treated as permission to act inside it. See Access Control for the design.
+
+- **`multitenant.New` requires a membership decision.** It returns an error
+  unless `Config.Membership` or `Config.InsecureSkipMembership` is set. To
+  keep v0.8 behaviour exactly, set the opt-out:
+  ```go
+  config.InsecureSkipMembership = true
+  ```
+  To close the gap instead, set a `Membership`: `tenant.ClaimMembership("org_id")`
+  if your token carries the tenant, or a `tenant.MembershipFunc` over your own
+  membership table. Your auth middleware must then put the caller in the
+  request context with `tenant.WithPrincipal` (or `tenant.WithUserID`, which
+  now does the same). `httpmw.New` and the Gin adapter are unchanged; the
+  requirement applies only to `multitenant.New`.
+- **A resolved tenant is always checked, whatever the skip lists say.**
+  `ValidateTenant`, `EnforceLimits` and `RequireMembership` consult `SkipPaths`
+  and `SkipHosts` only while no tenant has been resolved. This changes nothing
+  for requests `ResolveTenant` skipped too. It changes behaviour only for a
+  chain that rewrites the path after resolution, for example with
+  `http.StripPrefix`, where a suspended or over-limit tenant previously
+  slipped through.
+- **`SkipPaths` and `SkipHosts` are now on `multitenant.Config`.** A nil
+  `SkipPaths` keeps the previous built-in list (`/health`, `/metrics`,
+  `/api/public/`), so an upgrade that sets neither sees no change.
+- **Two new error codes:** `USER_NOT_AUTHENTICATED` (401) when
+  `RequireMembership` finds no principal, or one with an empty subject, and
+  `ACCESS_DENIED` (403) when the `Membership` refuses the caller.
 
 ## ⬆️ Upgrading from v0.7
 

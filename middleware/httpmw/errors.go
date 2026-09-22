@@ -46,6 +46,10 @@ func statusForCode(code string) int {
 		return http.StatusPaymentRequired
 	case "PLAN_NOT_CONFIGURED":
 		return http.StatusForbidden
+	case "USER_NOT_AUTHENTICATED":
+		return http.StatusUnauthorized
+	case "ACCESS_DENIED":
+		return http.StatusForbidden
 	default:
 		return http.StatusInternalServerError
 	}

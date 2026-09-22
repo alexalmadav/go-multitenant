@@ -17,6 +17,10 @@ import (
 func main() {
 	// Create configuration
 	config := multitenant.DefaultConfig()
+	// This example sets no Membership, so it opts out of the check on the
+	// record. A real application sets config.Membership instead; see the
+	// README's Access Control section.
+	config.InsecureSkipMembership = true
 
 	// Configure database connection
 	config.Database.DSN = "postgres://username:password@localhost:5432/multitenant_db?sslmode=disable"

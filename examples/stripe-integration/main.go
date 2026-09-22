@@ -29,6 +29,10 @@ func (logStripe) DeleteCustomer(ctx context.Context, id string) error {
 
 func main() {
 	config := multitenant.DefaultConfig()
+	// This example sets no Membership, so it opts out of the check on the
+	// record. A real application sets config.Membership instead; see the
+	// README's Access Control section.
+	config.InsecureSkipMembership = true
 	config.Database.DSN = os.Getenv("DATABASE_URL")
 	config.Database.MigrationsDir = "./migrations" // your tenant schema lives here
 

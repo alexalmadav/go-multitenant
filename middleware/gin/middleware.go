@@ -6,6 +6,11 @@
 // keys "tenant", "tenant_id", "tenant_object", "tenant_conn" and
 // "plan_limits" (a limits.FlexibleLimits, set only when Config.Limits is
 // configured).
+//
+// The adapter promotes a "user_id" set on the Gin context to a
+// tenant.Principal when the request context carries none, so existing
+// applications keep working; set a principal with claims directly on the
+// request context with tenant.WithPrincipal.
 package gin
 
 import (
@@ -35,6 +40,18 @@ type Config struct {
 	// Limits enables EnforceLimits; nil is a pass-through. Use the checker
 	// from multitenant.MultiTenant.Limits, or any limits.Enforcer.
 	Limits limits.Enforcer
+	// Membership authorises the caller for the resolved tenant in
+	// RequireMembership. Nil makes RequireMembership deny every request; see
+	// package httpmw.
+	//
+	// Setting this field alone enforces nothing. Unlike httpmw.Standard, this
+	// adapter bundles no middleware, so RequireMembership() must be added to
+	// the chain by hand or the check never runs.
+	Membership tenant.Membership
+	// SkipHosts are hosts that bypass tenant resolution, such as a single
+	// sign-on origin. Matched against the request host without its port,
+	// ignoring case.
+	SkipHosts []string
 }
 
 // Middleware provides Gin handlers backed by httpmw.
@@ -49,7 +66,7 @@ type ginContextKey struct{}
 
 // NewMiddleware creates the Gin middleware.
 func NewMiddleware(manager tenant.Manager, resolver tenant.Resolver, logger *zap.Logger, cfg Config) *Middleware {
-	coreCfg := httpmw.Config{SkipPaths: cfg.SkipPaths, ClientIP: cfg.ClientIP}
+	coreCfg := httpmw.Config{SkipPaths: cfg.SkipPaths, SkipHosts: cfg.SkipHosts, ClientIP: cfg.ClientIP}
 	if cfg.ErrorHandler != nil {
 		coreCfg.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 			if c, ok := r.Context().Value(ginContextKey{}).(*gin.Context); ok {
@@ -62,6 +79,9 @@ func NewMiddleware(manager tenant.Manager, resolver tenant.Resolver, logger *zap
 	var opts []httpmw.Option
 	if cfg.Limits != nil {
 		opts = append(opts, httpmw.WithLimits(cfg.Limits))
+	}
+	if cfg.Membership != nil {
+		opts = append(opts, httpmw.WithMembership(cfg.Membership))
 	}
 	return &Middleware{core: httpmw.New(manager, resolver, logger, coreCfg, opts...)}
 }
@@ -115,6 +135,13 @@ func (m *Middleware) ResolveTenant() gin.HandlerFunc { return m.adapt(m.core.Res
 
 // ValidateTenant rejects requests whose tenant is not active.
 func (m *Middleware) ValidateTenant() gin.HandlerFunc { return m.adapt(m.core.ValidateTenant()) }
+
+// RequireMembership rejects callers who do not belong to the resolved tenant.
+// Set the caller with tenant.WithPrincipal on the request context, or with
+// c.Set("user_id", ...) for a subject with no claims.
+func (m *Middleware) RequireMembership() gin.HandlerFunc {
+	return m.adapt(m.core.RequireMembership())
+}
 
 // EnforceLimits checks plan limits with Config.Limits and stores them under
 // "plan_limits". Without Config.Limits it is a pass-through.

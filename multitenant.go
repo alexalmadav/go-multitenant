@@ -5,6 +5,7 @@ package multitenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 
@@ -23,6 +24,34 @@ import (
 type Config struct {
 	tenant.Config
 	Limits *limits.Config
+	// Membership authorises an authenticated subject for the resolved tenant,
+	// and HTTPMiddleware.Standard enforces it. New requires either this or
+	// InsecureSkipMembership: whether callers are checked against the tenant
+	// they reach is a decision New will not make by default.
+	Membership tenant.Membership
+	// InsecureSkipMembership runs the middleware with no membership check.
+	// Standard then resolves, validates and scopes each request without asking
+	// whether the caller belongs to the tenant, so any caller that reaches a
+	// tenant's origin reaches its data. New refuses a Config that sets neither
+	// this nor Membership, so running without the check is always a written
+	// decision rather than a forgotten option. Set it only while no route
+	// serves tenant data to authenticated callers, or when membership is
+	// enforced somewhere this library cannot see.
+	InsecureSkipMembership bool
+	// SkipPaths are path prefixes whose requests bypass tenant handling. A
+	// nil slice keeps the default, []string{"/health", "/metrics",
+	// "/api/public/"}; a non-nil empty slice skips nothing. These prefixes
+	// bypass the membership check as well as tenant resolution, so a prefix
+	// listed here is an authorization decision, not only a routing one.
+	SkipPaths []string
+	// SkipHosts are hosts whose requests bypass tenant handling, matched
+	// against the request host without its port and ignoring case. Use it for
+	// an origin that serves no tenant, such as a single sign-on host.
+	//
+	// Warning: the request host is client-controlled, so only use SkipHosts
+	// where the front door pins it; see httpmw.Config.SkipHosts for the full
+	// caveat.
+	SkipHosts []string
 }
 
 // DefaultConfig returns the core defaults and no limits.
@@ -50,6 +79,22 @@ func New(config Config) (*MultiTenant, error) {
 	logger, err := setupLogger(config.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup logger: %w", err)
+	}
+
+	// Whether callers are checked against their tenant is a decision New
+	// will not make for the application. It is checked before anything
+	// touches the database, so it is the first error a misconfigured
+	// deployment sees.
+	switch {
+	case config.Membership == nil && !config.InsecureSkipMembership:
+		return nil, errors.New("multitenant: Config.Membership is nil; set a Membership, " +
+			"or set InsecureSkipMembership to run with no membership check, " +
+			"which lets any caller that reaches a tenant's origin reach its data")
+	case config.Membership != nil && config.InsecureSkipMembership:
+		return nil, errors.New("multitenant: Config.Membership and InsecureSkipMembership are both set; choose one")
+	case config.InsecureSkipMembership:
+		logger.Warn("InsecureSkipMembership is set: requests are scoped to a tenant " +
+			"without checking that the caller belongs to it")
 	}
 
 	// Validate the migrations directory early so a typo is visible at startup.
@@ -107,11 +152,20 @@ func New(config Config) (*MultiTenant, error) {
 		checker.SetUsageTracker(tracker)
 		mwOpts = append(mwOpts, httpmw.WithLimits(checker))
 	}
+	if config.Membership != nil {
+		mwOpts = append(mwOpts, httpmw.WithMembership(config.Membership))
+	}
 
 	// Framework-neutral middleware. Gin users wrap it with the adapter in
-	// github.com/alexalmadav/go-multitenant/middleware/gin.
+	// github.com/alexalmadav/go-multitenant/middleware/gin. Only a nil
+	// SkipPaths takes the default; an explicitly empty slice skips nothing.
+	skipPaths := config.SkipPaths
+	if skipPaths == nil {
+		skipPaths = []string{"/health", "/metrics", "/api/public/"}
+	}
 	httpMw := httpmw.New(manager, resolver, logger, httpmw.Config{
-		SkipPaths: []string{"/health", "/metrics", "/api/public/"},
+		SkipPaths: skipPaths,
+		SkipHosts: config.SkipHosts,
 	}, mwOpts...)
 
 	return &MultiTenant{
