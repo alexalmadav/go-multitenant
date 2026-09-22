@@ -38,11 +38,12 @@ type Config struct {
 
 // Middleware builds tenant middlewares for net/http.
 type Middleware struct {
-	manager  tenant.Manager
-	resolver tenant.Resolver
-	logger   *zap.Logger
-	config   Config
-	limits   limits.Enforcer
+	manager    tenant.Manager
+	resolver   tenant.Resolver
+	logger     *zap.Logger
+	config     Config
+	limits     limits.Enforcer
+	membership tenant.Membership
 }
 
 // Option configures a Middleware.
@@ -51,6 +52,13 @@ type Option func(*Middleware)
 // WithLimits enables plan-limit enforcement in EnforceLimits and Standard.
 func WithLimits(e limits.Enforcer) Option {
 	return func(m *Middleware) { m.limits = e }
+}
+
+// WithMembership supplies the authorization check RequireMembership applies.
+// Without it, RequireMembership denies every request; see its documentation
+// for why that differs from WithLimits.
+func WithMembership(m tenant.Membership) Option {
+	return func(mw *Middleware) { mw.membership = m }
 }
 
 // New creates a Middleware.
@@ -79,11 +87,20 @@ func Chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler 
 	return h
 }
 
-// Standard is ResolveTenant, ValidateTenant, EnforceLimits and SetTenantDB in
-// that order. EnforceLimits is a pass-through unless New was given WithLimits.
+// Standard is ResolveTenant, ValidateTenant, RequireMembership, EnforceLimits
+// and SetTenantDB in that order. RequireMembership is included only when New
+// was given WithMembership, so the bundle never denies every request because
+// an option was forgotten; apply RequireMembership by hand for the
+// fail-closed behaviour. EnforceLimits is a pass-through unless New was given
+// WithLimits.
 func (m *Middleware) Standard() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
-		return Chain(next, m.ResolveTenant(), m.ValidateTenant(), m.EnforceLimits(), m.SetTenantDB())
+		mws := []func(http.Handler) http.Handler{m.ResolveTenant(), m.ValidateTenant()}
+		if m.membership != nil {
+			mws = append(mws, m.RequireMembership())
+		}
+		mws = append(mws, m.EnforceLimits(), m.SetTenantDB())
+		return Chain(next, mws...)
 	}
 }
 
