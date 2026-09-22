@@ -526,3 +526,54 @@ func TestLogAccess_ForwardedClientIPOptIn(t *testing.T) {
 		t.Errorf("client_ip = %v, want 203.0.113.9", got)
 	}
 }
+
+func TestResolveTenantSkipsConfiguredHost(t *testing.T) {
+	failing := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+		return uuid.Nil, errors.New("resolver must not be called for a skipped host")
+	}}
+	mw := New(&stubManager{}, failing, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}})
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req.Host = "auth.app.com"
+	code, _ := serve(t, mw.ResolveTenant()(okHandler()), req)
+
+	if code != http.StatusOK {
+		t.Errorf("status = %d, want %d", code, http.StatusOK)
+	}
+}
+
+// Host matching ignores the port and case, since neither is part of the
+// operator's intent.
+func TestSkipHostIgnoresPortAndCase(t *testing.T) {
+	failing := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+		return uuid.Nil, errors.New("resolver must not be called for a skipped host")
+	}}
+	mw := New(&stubManager{}, failing, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}})
+
+	for _, host := range []string{"auth.app.com:8443", "AUTH.App.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/login", nil)
+		req.Host = host
+		if code, _ := serve(t, mw.ResolveTenant()(okHandler()), req); code != http.StatusOK {
+			t.Errorf("host %q: status = %d, want %d", host, code, http.StatusOK)
+		}
+	}
+}
+
+func TestSkipHostDoesNotSkipOtherHosts(t *testing.T) {
+	mw := New(&stubManager{}, &stubResolver{
+		resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+			return uuid.Nil, errors.New("no tenant")
+		},
+	}, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Host = "acme.app.com"
+	code, body := serve(t, mw.ResolveTenant()(okHandler()), req)
+
+	if code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", code, http.StatusNotFound)
+	}
+	if got := errorCode(body); got != "TENANT_NOT_FOUND" {
+		t.Errorf("code = %q, want TENANT_NOT_FOUND", got)
+	}
+}

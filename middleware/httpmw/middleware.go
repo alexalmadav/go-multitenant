@@ -22,6 +22,11 @@ type Config struct {
 	// SkipPaths are path prefixes that bypass ResolveTenant, e.g. "/health".
 	// Middlewares downstream of ResolveTenant pass such requests through.
 	SkipPaths []string
+	// SkipHosts are hosts that bypass ResolveTenant entirely, matched against
+	// r.Host without its port and ignoring case. Use it for an origin that
+	// serves no tenant, such as a single sign-on host like "auth.app.com",
+	// where resolution would necessarily fail.
+	SkipHosts []string
 	// ErrorHandler writes the response for a tenant error. Defaults to
 	// DefaultErrorHandler.
 	ErrorHandler func(w http.ResponseWriter, r *http.Request, err error)
@@ -87,7 +92,7 @@ func (m *Middleware) Standard() func(http.Handler) http.Handler {
 func (m *Middleware) ResolveTenant() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if m.shouldSkipPath(r.URL.Path) {
+			if m.shouldSkip(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -131,7 +136,7 @@ func (m *Middleware) ResolveTenant() func(http.Handler) http.Handler {
 func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if m.shouldSkipPath(r.URL.Path) {
+			if m.shouldSkip(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -171,7 +176,7 @@ func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		guarded := inner(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if m.shouldSkipPath(r.URL.Path) {
+			if m.shouldSkip(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -274,9 +279,30 @@ func (m *Middleware) LogAccess() func(http.Handler) http.Handler {
 	}
 }
 
+// shouldSkip reports whether the request bypasses tenant handling, either
+// because its path is under a SkipPaths prefix or its host is in SkipHosts.
+func (m *Middleware) shouldSkip(r *http.Request) bool {
+	return m.shouldSkipPath(r.URL.Path) || m.shouldSkipHost(r.Host)
+}
+
 func (m *Middleware) shouldSkipPath(path string) bool {
 	for _, p := range m.config.SkipPaths {
 		if strings.HasPrefix(path, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Middleware) shouldSkipHost(host string) bool {
+	if len(m.config.SkipHosts) == 0 {
+		return false
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	for _, sh := range m.config.SkipHosts {
+		if strings.EqualFold(host, sh) {
 			return true
 		}
 	}
