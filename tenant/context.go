@@ -10,6 +10,9 @@ const (
 	// ContextKeyUserID carries the authenticated user's id, set by the
 	// application's auth middleware and read by LogAccess.
 	ContextKeyUserID ContextKey = "user_id"
+	// ContextKeyPrincipal carries the authenticated caller as a Principal,
+	// set by the application's auth middleware with WithPrincipal.
+	ContextKeyPrincipal ContextKey = "principal"
 	// ContextKeyPlanLimits carries the limits checked by EnforceLimits.
 	ContextKeyPlanLimits ContextKey = "plan_limits"
 )
@@ -25,9 +28,11 @@ func TenantObjectFromContext(ctx context.Context) (*Tenant, bool) {
 	return t, ok
 }
 
-// WithUserID returns a context carrying the authenticated user's id.
+// WithUserID returns a context carrying the authenticated user's id. It is
+// shorthand for WithPrincipal with only a subject; use WithPrincipal when the
+// caller also has claims.
 func WithUserID(ctx context.Context, userID string) context.Context {
-	return context.WithValue(ctx, ContextKeyUserID, userID)
+	return WithPrincipal(ctx, Principal{Subject: userID})
 }
 
 // UserIDFromContext returns the user id set with WithUserID.
