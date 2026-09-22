@@ -239,21 +239,21 @@ was set when `mt.HTTPMiddleware` was built; for the Gin adapter, pass
 
 ### Available Middleware
 
-`mt.HTTPMiddleware` (package `httpmw`, `net/http`) provides five middlewares:
+`mt.HTTPMiddleware` (package `httpmw`, `net/http`) provides six middlewares:
 
 ```go
-mt.HTTPMiddleware.ResolveTenant()    // Resolves tenant from request
-mt.HTTPMiddleware.ValidateTenant()   // Validates tenant status
-mt.HTTPMiddleware.EnforceLimits()    // Enforces plan limits
-mt.HTTPMiddleware.SetTenantDB()      // Sets up tenant database context
-mt.HTTPMiddleware.LogAccess()        // Logs tenant access
+mt.HTTPMiddleware.ResolveTenant()      // Resolves tenant from request
+mt.HTTPMiddleware.ValidateTenant()     // Validates tenant status
+mt.HTTPMiddleware.RequireMembership()  // Checks the caller belongs to the tenant
+mt.HTTPMiddleware.EnforceLimits()      // Enforces plan limits
+mt.HTTPMiddleware.SetTenantDB()        // Sets up tenant database context
+mt.HTTPMiddleware.LogAccess()          // Logs tenant access
 ```
 
-Access and role checks (e.g. requiring admin privileges) are the
-application's concern, not this library's — put your own auth middleware
-ahead of these in the chain. To have the authenticated user show up as
-`user_id` in `LogAccess`'s output, call `tenant.WithUserID` on the request
-context from that middleware before the request reaches `LogAccess`.
+This library authenticates nobody. Put your own auth middleware ahead of these
+in the chain and have it call `tenant.WithPrincipal` (or `tenant.WithUserID`,
+its subject-only shorthand) on the request context. `LogAccess` reads the
+subject, and `RequireMembership` authorises it.
 
 ### Middleware Chain Example
 
@@ -485,10 +485,97 @@ See `examples/stripe-integration` for a hook that keeps an external system in sy
 
 ### Access Control
 
-This library has no access-validation API. Whether a user may act on a
-tenant at all, and role/admin-only checks (e.g. "is this user an admin of
-this tenant"), are entirely the application's responsibility — enforce them
-in your own auth middleware, ahead of the tenant middleware chain.
+Resolving a tenant is not the same as being entitled to it. Without a
+membership check, a caller authenticated at `acme.app.com` can send the same
+credential to `globex.app.com` and be scoped to Globex's schema.
+
+`Membership` is the one authorization decision this library makes, and you
+supply it:
+
+```go
+type Membership interface {
+    Allow(ctx context.Context, subject string, tenantID uuid.UUID) error
+}
+```
+
+When the tenant is already named in the token — Auth0 `org_id`, Clerk
+`org_slug`, WorkOS `organization_id` — no query is needed. The claim may hold
+one value or a list, and may name the tenant by id or by subdomain:
+
+```go
+cfg.Membership = tenant.ClaimMembership("org_id")
+```
+
+When the answer lives in your own database, close over it:
+
+```go
+cfg.Membership = tenant.MembershipFunc(func(ctx context.Context, subject string, id uuid.UUID) error {
+    var ok bool
+    err := db.QueryRowContext(ctx,
+        `SELECT EXISTS (SELECT 1 FROM memberships WHERE user_id = $1 AND tenant_id = $2)`,
+        subject, id).Scan(&ok)
+    if err != nil {
+        return err
+    }
+    if !ok {
+        return tenant.ErrNotMember
+    }
+    return nil
+})
+```
+
+The library owns no membership table: your identity provider or your own
+schema already holds that, with your own subject type, and a second copy would
+only drift.
+
+`RequireMembership` **fails closed**. With no `Membership` configured it denies
+every request rather than passing them through, because a missed limit check
+costs money while a missed membership check serves one tenant's data to
+another. `Standard()` includes the check only when a `Membership` is
+configured, so the convenience bundle cannot silently deny everything.
+
+Role and permission checks stay yours — the library has no role model.
+
+Authentication itself is unaffected by tenancy in the common case: keep your
+users in `public`, give Goth, Authboss, go-pkgz/auth or golang-jwt a plain
+`*sql.DB`, and let tenancy enter only at `RequireMembership`:
+
+```go
+handler := httpmw.Chain(mux,
+    authMiddleware,                        // yours; calls tenant.WithPrincipal
+    mt.HTTPMiddleware.ResolveTenant(),
+    mt.HTTPMiddleware.RequireMembership(),
+    mt.HTTPMiddleware.SetTenantDB(),
+)
+```
+
+If your login lives on its own origin, list it in `Config.SkipHosts` so
+`ResolveTenant` does not try to resolve a tenant there:
+
+```go
+httpmw.Config{SkipHosts: []string{"auth.app.com"}}
+```
+
+Two cases need more than the above, and are described in
+`docs/superpowers/specs/2026-09-21-membership-design.md`:
+
+- **Users inside the tenant schema.** The auth library's storer must resolve
+  the tenant per call, so its storage interface has to take a
+  `context.Context` — Authboss's `ServerStorer.Load(ctx, key)` does,
+  go-pkgz/auth's `CredChecker.Check(user, password)` does not. Note that
+  `tenant.Conn` is not `*sql.DB`-shaped: `QueryContext` returns `*tenant.Rows`
+  because the pooler-safe `SET LOCAL` design needs something to own and commit
+  the wrapping transaction. Write such storers against `*tenant.Conn`.
+- **Per-tenant auth configuration** (tenant A on Okta, tenant B on Google).
+  Needs one auth-library instance per tenant, cached. Goth forces this when
+  tenants bring their own OAuth apps, because `goth.UseProviders` and
+  `gothic.Store` are package-level globals.
+
+Two things bite regardless: a session cookie scoped to `.app.com` gives
+cross-tenant SSO but reaches every tenant subdomain and rules out the
+`__Host-` prefix; and OAuth redirect URIs must be pre-registered, with
+wildcard subdomains mostly unsupported, so the callback belongs on one origin
+with the tenant carried in the `state` parameter.
 
 ### Input Validation
 

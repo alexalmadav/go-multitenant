@@ -23,6 +23,11 @@ import (
 type Config struct {
 	tenant.Config
 	Limits *limits.Config
+	// Membership authorises an authenticated subject for the resolved tenant.
+	// When set, HTTPMiddleware.Standard enforces it. Nil leaves the check out
+	// of Standard; HTTPMiddleware.RequireMembership then denies every
+	// request, which is deliberate — see package httpmw.
+	Membership tenant.Membership
 }
 
 // DefaultConfig returns the core defaults and no limits.
@@ -106,6 +111,9 @@ func New(config Config) (*MultiTenant, error) {
 		}
 		checker.SetUsageTracker(tracker)
 		mwOpts = append(mwOpts, httpmw.WithLimits(checker))
+	}
+	if config.Membership != nil {
+		mwOpts = append(mwOpts, httpmw.WithMembership(config.Membership))
 	}
 
 	// Framework-neutral middleware. Gin users wrap it with the adapter in
