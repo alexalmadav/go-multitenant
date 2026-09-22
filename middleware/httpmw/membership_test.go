@@ -150,6 +150,56 @@ func TestRequireMembershipPassesSkippedHostsThrough(t *testing.T) {
 	}
 }
 
+// A skip list must not disable the check for a request that already carries a
+// resolved tenant. shouldSkip re-reads r.URL.Path and r.Host, which a rewrite
+// such as http.StripPrefix can change between ResolveTenant and here, and
+// SetTenantDB downstream would still scope the request to that tenant's
+// schema. Restoring the original skip-first ordering fails this test and
+// nothing else.
+func TestRequireMembershipEnforcesAResolvedTenantOnASkippedPath(t *testing.T) {
+	id := uuid.New()
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{SkipPaths: []string{"/health"}}, WithMembership(denyAll()))
+
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), withPrincipal("u-1"), mw.RequireMembership())
+	code, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d - a skipped path disabled the check for a resolved tenant", code, http.StatusForbidden)
+	}
+	if got := errorCode(body); got != "ACCESS_DENIED" {
+		t.Errorf("code = %q, want ACCESS_DENIED", got)
+	}
+}
+
+// An empty subject is never a legitimate authenticated identity, so the
+// middleware rejects it rather than passing "" to Allow and leaving every
+// implementation to decide whether the empty string is a user. The membership
+// here allows everything, so dropping the empty-subject condition turns this
+// into a 200 and the recorder proves why.
+func TestRequireMembershipRejectsAnEmptySubject(t *testing.T) {
+	id := uuid.New()
+	var asked bool
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{}, WithMembership(
+		tenant.MembershipFunc(func(context.Context, string, uuid.UUID) error {
+			asked = true
+			return nil
+		}),
+	))
+
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), withPrincipal(""), mw.RequireMembership())
+	code, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", code, http.StatusUnauthorized)
+	}
+	if got := errorCode(body); got != "USER_NOT_AUTHENTICATED" {
+		t.Errorf("code = %q, want USER_NOT_AUTHENTICATED", got)
+	}
+	if asked {
+		t.Error("Allow was called with an empty subject; the middleware must reject it first")
+	}
+}
+
 // Standard omits the check when no Membership was configured, so the
 // convenience bundle never silently denies everything. The request carries no
 // principal at all, so a Standard that enforced membership would stop it with
