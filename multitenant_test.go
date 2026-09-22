@@ -26,6 +26,8 @@ func TestNew_InvalidConfig(t *testing.T) {
 						DSN: "invalid-dsn",
 					},
 				},
+				// Get past the membership decision so the DSN is what fails.
+				InsecureSkipMembership: true,
 			},
 		},
 	}
@@ -359,6 +361,7 @@ func TestNew_RejectsMissingMigrationsDir(t *testing.T) {
 	config := DefaultConfig()
 	config.Database.DSN = "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
 	config.Database.MigrationsDir = filepath.Join(t.TempDir(), "does-not-exist")
+	config.InsecureSkipMembership = true
 
 	_, err := New(config)
 	if err == nil {

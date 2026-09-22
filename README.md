@@ -54,6 +54,11 @@ config.Database.MigrationsDir = "./migrations"
 config.Resolver.Strategy = multitenant.ResolverSubdomain
 config.Resolver.Domain = "myapp.com"
 
+// New requires you to decide whether callers are checked against the tenant
+// they reach. This quick start has no auth, so it opts out on the record; set
+// config.Membership before serving real traffic (see Access Control).
+config.InsecureSkipMembership = true
+
 // Limits are opt-in: config.Limits is nil (no enforcement) unless you set it.
 l := limits.ExampleConfig()
 config.Limits = &l
@@ -538,11 +543,25 @@ The library owns no membership table: your identity provider or your own
 schema already holds that, with your own subject type, and a second copy would
 only drift.
 
-`RequireMembership` **fails closed**. With no `Membership` configured it denies
-every request rather than passing them through, because a missed limit check
-costs money while a missed membership check serves one tenant's data to
-another. `Standard()` includes the check only when a `Membership` is
-configured, so the convenience bundle cannot silently deny everything.
+`multitenant.New` **will not choose for you**. It returns an error unless the
+`Config` sets either a `Membership` or `InsecureSkipMembership: true`, and it
+refuses both at once. A forgotten option therefore breaks startup rather than
+isolation, and running without the check is always written down:
+
+```go
+cfg.InsecureSkipMembership = true // any caller reaching a tenant's origin reaches its data
+```
+
+`New` logs a warning at startup when the opt-out is set.
+
+Below `New`, the rule is the same in spirit. `RequireMembership` **fails
+closed**: applied with no `Membership` configured, it denies every request
+rather than passing them through, because a missed limit check costs money
+while a missed membership check serves one tenant's data to another.
+`httpmw.Standard()` includes the check only when a `Membership` is configured.
+If you assemble `httpmw.New` or the Gin adapter yourself rather than going
+through `multitenant.New`, the startup requirement does not apply, so add
+`RequireMembership()` to your chain deliberately.
 
 Role and permission checks stay yours — the library has no role model.
 
@@ -739,6 +758,37 @@ CREATE TABLE projects (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+## ⬆️ Upgrading from v0.8
+
+v0.9.0 adds a membership check: resolving a tenant from a request is no longer
+treated as permission to act inside it. See Access Control for the design.
+
+- **`multitenant.New` requires a membership decision.** It returns an error
+  unless `Config.Membership` or `Config.InsecureSkipMembership` is set. To
+  keep v0.8 behaviour exactly, set the opt-out:
+  ```go
+  config.InsecureSkipMembership = true
+  ```
+  To close the gap instead, set a `Membership`: `tenant.ClaimMembership("org_id")`
+  if your token carries the tenant, or a `tenant.MembershipFunc` over your own
+  membership table. Your auth middleware must then put the caller in the
+  request context with `tenant.WithPrincipal` (or `tenant.WithUserID`, which
+  now does the same). `httpmw.New` and the Gin adapter are unchanged; the
+  requirement applies only to `multitenant.New`.
+- **A resolved tenant is always checked, whatever the skip lists say.**
+  `ValidateTenant`, `EnforceLimits` and `RequireMembership` consult `SkipPaths`
+  and `SkipHosts` only while no tenant has been resolved. This changes nothing
+  for requests `ResolveTenant` skipped too. It changes behaviour only for a
+  chain that rewrites the path after resolution, for example with
+  `http.StripPrefix`, where a suspended or over-limit tenant previously
+  slipped through.
+- **`SkipPaths` and `SkipHosts` are now on `multitenant.Config`.** A nil
+  `SkipPaths` keeps the previous built-in list (`/health`, `/metrics`,
+  `/api/public/`), so an upgrade that sets neither sees no change.
+- **Two new error codes:** `USER_NOT_AUTHENTICATED` (401) when
+  `RequireMembership` finds no principal, or one with an empty subject, and
+  `ACCESS_DENIED` (403) when the `Membership` refuses the caller.
 
 ## ⬆️ Upgrading from v0.7
 

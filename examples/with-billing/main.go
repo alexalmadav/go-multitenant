@@ -18,6 +18,10 @@ import (
 func main() {
 	// Create configuration with custom limits for different plans
 	config := multitenant.DefaultConfig()
+	// This example sets no Membership, so it opts out of the check on the
+	// record. A real application sets config.Membership instead; see the
+	// README's Access Control section.
+	config.InsecureSkipMembership = true
 
 	// Configure database. MigrationsDir points at this app's migration files,
 	// which define the "projects" and "tenant_users" tables that UsageTables

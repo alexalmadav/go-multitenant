@@ -61,6 +61,10 @@ func main() {
 func createCustomConfig() multitenant.Config {
 	// Start with default config
 	config := multitenant.DefaultConfig()
+	// This example sets no Membership, so it opts out of the check on the
+	// record. A real application sets config.Membership instead; see the
+	// README's Access Control section.
+	config.InsecureSkipMembership = true
 
 	// Customize database
 	config.Database.DSN = "postgres://username:password@localhost:5432/flexible_limits_db?sslmode=disable"

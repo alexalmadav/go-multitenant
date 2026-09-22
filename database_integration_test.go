@@ -165,6 +165,10 @@ func testConfig(dsn string) Config {
 	config := DefaultConfig()
 	config.Database.DSN = dsn
 	config.Database.MigrationsDir = fixtureMigrationsDir
+	// These tests exercise the manager, schemas, migrations and limits, not
+	// mt.HTTPMiddleware's membership check. The membership tests build their
+	// own chains with a real Membership; see cross_tenant_integration_test.go.
+	config.InsecureSkipMembership = true
 	l := limits.ExampleConfig()
 	l.UsageTables = map[string]string{
 		"max_projects": "projects",

@@ -5,6 +5,7 @@ package multitenant
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 
@@ -23,11 +24,20 @@ import (
 type Config struct {
 	tenant.Config
 	Limits *limits.Config
-	// Membership authorises an authenticated subject for the resolved tenant.
-	// When set, HTTPMiddleware.Standard enforces it. Nil leaves the check out
-	// of Standard; HTTPMiddleware.RequireMembership then denies every
-	// request, which is deliberate — see package httpmw.
+	// Membership authorises an authenticated subject for the resolved tenant,
+	// and HTTPMiddleware.Standard enforces it. New requires either this or
+	// InsecureSkipMembership: whether callers are checked against the tenant
+	// they reach is a decision New will not make by default.
 	Membership tenant.Membership
+	// InsecureSkipMembership runs the middleware with no membership check.
+	// Standard then resolves, validates and scopes each request without asking
+	// whether the caller belongs to the tenant, so any caller that reaches a
+	// tenant's origin reaches its data. New refuses a Config that sets neither
+	// this nor Membership, so running without the check is always a written
+	// decision rather than a forgotten option. Set it only while no route
+	// serves tenant data to authenticated callers, or when membership is
+	// enforced somewhere this library cannot see.
+	InsecureSkipMembership bool
 	// SkipPaths are path prefixes whose requests bypass tenant handling. A
 	// nil slice keeps the default, []string{"/health", "/metrics",
 	// "/api/public/"}; a non-nil empty slice skips nothing. These prefixes
@@ -69,6 +79,22 @@ func New(config Config) (*MultiTenant, error) {
 	logger, err := setupLogger(config.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup logger: %w", err)
+	}
+
+	// Whether callers are checked against their tenant is a decision New
+	// will not make for the application. It is checked before anything
+	// touches the database, so it is the first error a misconfigured
+	// deployment sees.
+	switch {
+	case config.Membership == nil && !config.InsecureSkipMembership:
+		return nil, errors.New("multitenant: Config.Membership is nil; set a Membership, " +
+			"or set InsecureSkipMembership to run with no membership check, " +
+			"which lets any caller that reaches a tenant's origin reach its data")
+	case config.Membership != nil && config.InsecureSkipMembership:
+		return nil, errors.New("multitenant: Config.Membership and InsecureSkipMembership are both set; choose one")
+	case config.InsecureSkipMembership:
+		logger.Warn("InsecureSkipMembership is set: requests are scoped to a tenant " +
+			"without checking that the caller belongs to it")
 	}
 
 	// Validate the migrations directory early so a typo is visible at startup.

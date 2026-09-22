@@ -50,6 +50,8 @@ func TestIntegration_SetTenantDBThroughAdapter(t *testing.T) {
 	config.Database.MigrationsDir = filepath.Join("..", "..", "testdata", "migrations")
 	config.Resolver.Strategy = tenant.ResolverHeader
 	config.Resolver.HeaderName = "X-Tenant"
+	// This test exercises SetTenantDB through the adapter, not membership.
+	config.InsecureSkipMembership = true
 	mt, err := multitenant.New(config)
 	if err != nil {
 		t.Fatalf("New: %v", err)
