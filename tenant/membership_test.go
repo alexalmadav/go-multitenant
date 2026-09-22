@@ -95,3 +95,14 @@ func TestClaimMembershipDeniesNonStringClaim(t *testing.T) {
 		t.Errorf("Allow = %v, want ErrNotMember", err)
 	}
 }
+
+// ClaimMembership can only answer for the principal in the context, so a
+// question about a different subject is denied rather than answered wrongly.
+func TestClaimMembershipDeniesASubjectMismatch(t *testing.T) {
+	id := uuid.New()
+	ctx := claimCtx("org_id", id.String(), nil)
+	err := ClaimMembership("org_id").Allow(ctx, "someone-else", id)
+	if !errors.Is(err, ErrNotMember) {
+		t.Errorf("Allow = %v, want ErrNotMember", err)
+	}
+}

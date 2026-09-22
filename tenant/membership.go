@@ -60,11 +60,18 @@ var ErrNotMember = errors.New("subject is not a member of this tenant")
 // "org_id", Clerk "org_slug" and WorkOS "organization_id", or with your own
 // JWT. Matching by subdomain needs the full tenant record, which
 // httpmw.ResolveTenant puts in the context.
+//
+// The subject argument must match the Subject of the Principal in the context;
+// a request that disagrees is denied, because this implementation can only
+// answer for the principal the context carries.
 func ClaimMembership(claim string) Membership {
-	return MembershipFunc(func(ctx context.Context, _ string, tenantID uuid.UUID) error {
+	return MembershipFunc(func(ctx context.Context, subject string, tenantID uuid.UUID) error {
 		p, ok := PrincipalFromContext(ctx)
 		if !ok {
 			return fmt.Errorf("%w: no principal in context", ErrNotMember)
+		}
+		if subject != "" && subject != p.Subject {
+			return fmt.Errorf("%w: asked about subject %q but the context carries %q", ErrNotMember, subject, p.Subject)
 		}
 		raw, ok := p.Claim(claim)
 		if !ok {
