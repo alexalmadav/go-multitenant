@@ -88,6 +88,7 @@ ginMw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), gi
     SkipPaths: []string{"/health"},
 })
 api := r.Group("/api")
+// Add ginMw.RequireMembership() once you have auth; see Access Control below.
 api.Use(ginMw.ResolveTenant(), ginMw.ValidateTenant(), ginMw.EnforceLimits(), ginMw.SetTenantDB())
 ```
 
