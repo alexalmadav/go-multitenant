@@ -43,6 +43,10 @@ type Config struct {
 	// Membership authorises the caller for the resolved tenant in
 	// RequireMembership. Nil makes RequireMembership deny every request; see
 	// package httpmw.
+	//
+	// Setting this field alone enforces nothing. Unlike httpmw.Standard, this
+	// adapter bundles no middleware, so RequireMembership() must be added to
+	// the chain by hand or the check never runs.
 	Membership tenant.Membership
 	// SkipHosts are hosts that bypass tenant resolution, such as a single
 	// sign-on origin. Matched against the request host without its port,

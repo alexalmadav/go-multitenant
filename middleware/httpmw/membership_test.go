@@ -134,6 +134,22 @@ func TestRequireMembershipPassesSkippedPathsThrough(t *testing.T) {
 	}
 }
 
+// SkipHosts exempts an origin that serves no tenant, so a request from one
+// must pass through. As with SkipPaths, the exemption only applies because no
+// tenant was resolved; the chain here puts none in the context.
+func TestRequireMembershipPassesSkippedHostsThrough(t *testing.T) {
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}}, WithMembership(denyAll()))
+
+	h := Chain(okHandler(), mw.RequireMembership())
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Host = "auth.app.com"
+	code, _ := serve(t, h, req)
+
+	if code != http.StatusOK {
+		t.Errorf("status = %d, want %d", code, http.StatusOK)
+	}
+}
+
 // Standard omits the check when no Membership was configured, so the
 // convenience bundle never silently denies everything. The request carries no
 // principal at all, so a Standard that enforced membership would stop it with
@@ -155,10 +171,15 @@ func TestStandardOmitsMembershipWhenUnconfigured(t *testing.T) {
 		t.Errorf("status = %d, want %d", code, http.StatusInternalServerError)
 	}
 	if got := errorCode(body); got != "DATABASE_ERROR" {
-		t.Errorf("code = %q, want DATABASE_ERROR - the chain stopped before SetTenantDB", got)
+		t.Errorf("code = %q, want DATABASE_ERROR - only SetTenantDB produces it, so anything else means the chain stopped before reaching it", got)
 	}
 }
 
+// This test pins the ordering as well as the outcome: mgr has a nil
+// getTenantConn, so it panics if the chain ever reaches SetTenantDB. A denied
+// membership must stop the request before then. Do not "fix" the stub by
+// giving it a working getTenantConn — that would silently lose the ordering
+// guarantee and leave only the status assertion behind.
 func TestStandardEnforcesMembershipWhenConfigured(t *testing.T) {
 	id := uuid.New()
 	mgr := &stubManager{tenants: map[uuid.UUID]*tenant.Tenant{id: {ID: id, Subdomain: "acme", Status: tenant.StatusActive}}}

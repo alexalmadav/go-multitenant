@@ -26,6 +26,15 @@ type Config struct {
 	// r.Host without its port and ignoring case. Use it for an origin that
 	// serves no tenant, such as a single sign-on host like "auth.app.com",
 	// where resolution would necessarily fail.
+	//
+	// Warning: r.Host is sent by the client, and net/http's ServeMux does not
+	// route on it by default, so any request that carries a listed Host
+	// bypasses ResolveTenant, ValidateTenant and RequireMembership on every
+	// route. No tenant is resolved and no tenant schema is reached, but the
+	// handler then runs with no tenant context. Only use SkipHosts where the
+	// front door pins the Host — virtual-host routing, or a reverse proxy
+	// that rejects unknown Hosts — and make sure the handlers reachable on a
+	// skipped origin tolerate an absent tenant context.
 	SkipHosts []string
 	// ErrorHandler writes the response for a tenant error. Defaults to
 	// DefaultErrorHandler.

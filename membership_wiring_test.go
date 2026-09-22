@@ -14,3 +14,18 @@ func TestDefaultConfigHasNoMembership(t *testing.T) {
 		t.Errorf("DefaultConfig().Membership = %v, want nil", got)
 	}
 }
+
+// SkipPaths and SkipHosts must default to nil. New reads a nil SkipPaths as
+// "keep the built-in defaults", so a non-nil default here would erase that
+// distinction and make an explicitly empty slice indistinguishable from an
+// unset one. A non-nil SkipHosts default would disable every check on an
+// origin nobody asked to exempt.
+func TestDefaultConfigHasNoSkipLists(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.SkipPaths != nil {
+		t.Errorf("DefaultConfig().SkipPaths = %v, want nil", cfg.SkipPaths)
+	}
+	if cfg.SkipHosts != nil {
+		t.Errorf("DefaultConfig().SkipHosts = %v, want nil", cfg.SkipHosts)
+	}
+}

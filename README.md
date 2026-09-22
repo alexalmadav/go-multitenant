@@ -259,18 +259,22 @@ subject, and `RequireMembership` authorises it.
 
 ```go
 handler := httpmw.Chain(mux,
-    authMiddleware,                      // Your auth middleware; sets tenant.WithUserID
-    mt.HTTPMiddleware.ResolveTenant(),   // Resolve tenant
-    mt.HTTPMiddleware.ValidateTenant(),  // Validate tenant status
-    mt.HTTPMiddleware.EnforceLimits(),   // Check limits
-    mt.HTTPMiddleware.SetTenantDB(),     // Set database context
-    mt.HTTPMiddleware.LogAccess(),       // Log access
+    authMiddleware,                         // Your auth middleware; sets tenant.WithUserID
+    mt.HTTPMiddleware.ResolveTenant(),      // Resolve tenant
+    mt.HTTPMiddleware.ValidateTenant(),     // Validate tenant status
+    mt.HTTPMiddleware.RequireMembership(),  // Authorise the caller for this tenant
+    mt.HTTPMiddleware.EnforceLimits(),      // Check limits
+    mt.HTTPMiddleware.SetTenantDB(),        // Set database context
+    mt.HTTPMiddleware.LogAccess(),          // Log access
 )
 ```
 
 Or use `mt.HTTPMiddleware.Standard()` — `ResolveTenant`, `ValidateTenant`,
-`EnforceLimits` and `SetTenantDB` chained as a single
-`func(http.Handler) http.Handler` (see [Quick Start](#quick-start-nethttp)):
+`RequireMembership`, `EnforceLimits` and `SetTenantDB` chained as a single
+`func(http.Handler) http.Handler` (see [Quick Start](#quick-start-nethttp)).
+`RequireMembership` is included only when a `Membership` is configured, so the
+bundle never denies every request because an option was forgotten; apply
+`RequireMembership` by hand for the fail-closed behaviour:
 
 ```go
 handler := mt.HTTPMiddleware.Standard()(mux)
@@ -278,7 +282,7 @@ handler := mt.HTTPMiddleware.Standard()(mux)
 
 ### Gin
 
-The [Gin adapter](./middleware/gin) wraps the same five middlewares under the
+The [Gin adapter](./middleware/gin) wraps the same six middlewares under the
 same method names. It stores every value both in the request context (read
 with package `tenant`'s helpers) and, for code that prefers it, under Gin
 context keys read with `c.Get`:
@@ -296,10 +300,15 @@ api := r.Group("/api")
 api.Use(authMiddleware())                  // Your auth middleware; sets tenant.WithUserID
 api.Use(ginMw.ResolveTenant())             // Resolve tenant
 api.Use(ginMw.ValidateTenant())            // Validate tenant status
+api.Use(ginMw.RequireMembership())         // Authorise the caller for this tenant
 api.Use(ginMw.EnforceLimits())             // Check limits
 api.Use(ginMw.SetTenantDB())               // Set database context
 api.Use(ginMw.LogAccess())                 // Log access
 ```
+
+The adapter has no `Standard()` and bundles nothing: setting
+`Config.Membership` alone enforces nothing, so `RequireMembership()` has to be
+in the chain above or the check never runs.
 
 Setting `c.Set("user_id", id)` from a Gin auth middleware still feeds the
 access log — the adapter bridges it onto the request context automatically.
@@ -555,6 +564,11 @@ If your login lives on its own origin, list it in `Config.SkipHosts` so
 ```go
 httpmw.Config{SkipHosts: []string{"auth.app.com"}}
 ```
+
+The request host is chosen by the client and `net/http`'s `ServeMux` does not
+route on it, so only use `SkipHosts` where the front door pins the Host —
+virtual-host routing, or a proxy that rejects unknown ones — and make sure the
+handlers reachable on a skipped origin tolerate an absent tenant context.
 
 Two cases need more than the above, and are described in
 `docs/superpowers/specs/2026-09-21-membership-design.md`:

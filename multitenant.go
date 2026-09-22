@@ -28,6 +28,20 @@ type Config struct {
 	// of Standard; HTTPMiddleware.RequireMembership then denies every
 	// request, which is deliberate — see package httpmw.
 	Membership tenant.Membership
+	// SkipPaths are path prefixes whose requests bypass tenant handling. A
+	// nil slice keeps the default, []string{"/health", "/metrics",
+	// "/api/public/"}; a non-nil empty slice skips nothing. These prefixes
+	// bypass the membership check as well as tenant resolution, so a prefix
+	// listed here is an authorization decision, not only a routing one.
+	SkipPaths []string
+	// SkipHosts are hosts whose requests bypass tenant handling, matched
+	// against the request host without its port and ignoring case. Use it for
+	// an origin that serves no tenant, such as a single sign-on host.
+	//
+	// Warning: the request host is client-controlled, so only use SkipHosts
+	// where the front door pins it; see httpmw.Config.SkipHosts for the full
+	// caveat.
+	SkipHosts []string
 }
 
 // DefaultConfig returns the core defaults and no limits.
@@ -117,9 +131,15 @@ func New(config Config) (*MultiTenant, error) {
 	}
 
 	// Framework-neutral middleware. Gin users wrap it with the adapter in
-	// github.com/alexalmadav/go-multitenant/middleware/gin.
+	// github.com/alexalmadav/go-multitenant/middleware/gin. Only a nil
+	// SkipPaths takes the default; an explicitly empty slice skips nothing.
+	skipPaths := config.SkipPaths
+	if skipPaths == nil {
+		skipPaths = []string{"/health", "/metrics", "/api/public/"}
+	}
 	httpMw := httpmw.New(manager, resolver, logger, httpmw.Config{
-		SkipPaths: []string{"/health", "/metrics", "/api/public/"},
+		SkipPaths: skipPaths,
+		SkipHosts: config.SkipHosts,
 	}, mwOpts...)
 
 	return &MultiTenant{
