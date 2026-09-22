@@ -577,3 +577,44 @@ func TestSkipHostDoesNotSkipOtherHosts(t *testing.T) {
 		t.Errorf("code = %q, want TENANT_NOT_FOUND", got)
 	}
 }
+
+// A skip list must not disable a status check for a request that already
+// carries a resolved tenant: shouldSkip re-reads r.URL.Path and r.Host, which
+// a rewrite such as http.StripPrefix can change between ResolveTenant and
+// here, and SetTenantDB downstream would still scope the request to that
+// tenant's schema. Restoring the original skip-first ordering fails this test
+// and nothing else.
+func TestValidateTenantEnforcesAResolvedTenantOnASkippedPath(t *testing.T) {
+	id := uuid.New()
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+
+	h := Chain(okHandler(), withTenant(id, tenant.StatusSuspended), mw.ValidateTenant())
+	code, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d - a skipped path let a suspended tenant through", code, http.StatusForbidden)
+	}
+	if got := errorCode(body); got != "TENANT_SUSPENDED" {
+		t.Errorf("code = %q, want TENANT_SUSPENDED", got)
+	}
+}
+
+// The same rule for plan limits: an over-limit tenant that has been resolved
+// is refused even on a skipped path.
+func TestEnforceLimitsEnforcesAResolvedTenantOnASkippedPath(t *testing.T) {
+	id := uuid.New()
+	over := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return nil, &tenant.TenantError{Code: "LIMIT_EXCEEDED", Message: "project limit reached"}
+	}}
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{SkipPaths: []string{"/health"}}, WithLimits(over))
+
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), mw.EnforceLimits())
+	code, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if code != http.StatusPaymentRequired {
+		t.Errorf("status = %d, want %d - a skipped path let an over-limit tenant through", code, http.StatusPaymentRequired)
+	}
+	if got := errorCode(body); got != "PLAN_LIMIT_EXCEEDED" {
+		t.Errorf("code = %q, want PLAN_LIMIT_EXCEEDED", got)
+	}
+}

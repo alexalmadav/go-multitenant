@@ -20,7 +20,11 @@ import (
 // Config configures the middleware.
 type Config struct {
 	// SkipPaths are path prefixes that bypass ResolveTenant, e.g. "/health".
-	// Middlewares downstream of ResolveTenant pass such requests through.
+	// Middlewares downstream of ResolveTenant pass such requests through,
+	// but only while no tenant has been resolved: once one is in the request
+	// context, ValidateTenant, RequireMembership and EnforceLimits all run
+	// regardless of these prefixes, so a path rewritten mid-chain cannot
+	// disable them.
 	SkipPaths []string
 	// SkipHosts are hosts that bypass ResolveTenant entirely, matched against
 	// r.Host without its port and ignoring case. Use it for an origin that
@@ -159,16 +163,22 @@ func (m *Middleware) ResolveTenant() func(http.Handler) http.Handler {
 }
 
 // ValidateTenant rejects requests whose tenant is not active.
+//
+// A request that carries no resolved tenant and matches a skipped path or
+// host passes through untouched. Once a tenant has been resolved its status
+// is always checked, whatever the skip lists say: shouldSkip re-reads
+// r.URL.Path and r.Host, which a rewrite such as http.StripPrefix can change
+// between ResolveTenant and here, and SetTenantDB downstream would still
+// scope the request to that tenant's schema.
 func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if m.shouldSkip(r) {
-				next.ServeHTTP(w, r)
-				return
-			}
-
 			tc, ok := tenant.GetTenantFromContext(r.Context())
 			if !ok {
+				if m.shouldSkip(r) {
+					next.ServeHTTP(w, r)
+					return
+				}
 				m.config.ErrorHandler(w, r, &tenant.TenantError{
 					Code: "TENANT_CONTEXT_MISSING", Message: "Tenant context not found - ensure ResolveTenant middleware is applied first"})
 				return
@@ -191,9 +201,13 @@ func (m *Middleware) ValidateTenant() func(http.Handler) http.Handler {
 
 // EnforceLimits checks plan limits for the resolved tenant with the enforcer
 // given to New via WithLimits. Without that option it is a pass-through.
-// Requests on a SkipPaths prefix bypass the check. Unlike the package
-// function, a failed check is logged with its underlying cause before the
-// response is sanitised.
+// Unlike the package function, a failed check is logged with its underlying
+// cause before the response is sanitised.
+//
+// A request that carries no resolved tenant and matches a skipped path or
+// host passes through untouched. Once a tenant has been resolved its limits
+// are always checked, whatever the skip lists say, for the reason given on
+// ValidateTenant.
 func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
 	inner := enforceLimits(m.limits, m.config.ErrorHandler, func(tenantID uuid.UUID, err error) {
 		m.logger.Error("Plan limits check failed",
@@ -202,7 +216,7 @@ func (m *Middleware) EnforceLimits() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		guarded := inner(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if m.shouldSkip(r) {
+			if _, ok := tenant.GetTenantFromContext(r.Context()); !ok && m.shouldSkip(r) {
 				next.ServeHTTP(w, r)
 				return
 			}
