@@ -420,28 +420,37 @@ cfg.Database.RoleIsolation = tenant.RoleIsolationConfig{
 }
 ```
 
+Use TLS between the application and PgBouncer: derived passwords travel over
+that link.
+
 Application code does not change: `GetTenantConn`, `WithTenantTx` and the
 middleware hand out connections logged in as the tenant's role.
 
 **Requirements.** PostgreSQL 15 or later — earlier versions let every role
-create tables in `public`. The admin role in `Database.DSN` needs `CREATEROLE`
-and membership in `pg_signal_backend`, which it uses to end a suspended
-tenant's sessions. `New` checks all three at startup. Provisioning, rotation,
+create tables in `public`. The admin role in `Database.DSN` must be a
+superuser, or have `CREATEROLE` and membership in `pg_signal_backend`, which it
+uses to end a suspended tenant's sessions. `New` checks the version and these
+privileges at startup. Provisioning, rotation,
 repair and migrations must all run as that same admin role, or as a role it
 is a member of: PostgreSQL 16 lets a `CREATEROLE` role manage only the roles
 it created, and a role can grant only on tables it owns or whose owner it is a
 member of. Migrations run by an unrelated user are not supported.
 
-**Enabling it on an existing deployment.** Deploy with role isolation
-configured, then run `mt.EnsureTenantRoles(ctx)` once to create a role for
-every provisioned tenant. It is idempotent and doubles as the repair tool: it
+**Enabling it on an existing deployment.** Tenants without a role cannot
+connect in role mode, so the order matters:
+
+1. Run `mt.EnsureTenantRoles(ctx)` once, from a one-off job or from a single
+   instance built with the role-mode config, before that config takes traffic.
+2. If you use an `auth_file`, render it and `RELOAD` PgBouncer.
+3. Roll out the role-mode config to the serving instances.
+
+`EnsureTenantRoles` is idempotent and doubles as the repair tool: it
 creates a missing role, resets the role's password, `LOGIN` state and grants,
 and resets its attributes to `NOINHERIT NOCREATEDB NOCREATEROLE NOSUPERUSER
 NOREPLICATION NOBYPASSRLS`. A `CREATEROLE` admin that is not a superuser can
 reset only `NOINHERIT` and `NOCREATEROLE`; it resets the other attributes
 only when it holds them itself. Each role is guarded by an advisory lock, so
-concurrent runs are safe. `EnsureTenantRoles` does not visit cancelled
-tenants.
+concurrent runs are safe. It does not visit cancelled tenants.
 
 **What each tenant role can do.** `SELECT`, `INSERT`, `UPDATE` and `DELETE`
 on its own tables, and use its own sequences. It cannot read another tenant's
@@ -532,6 +541,9 @@ auth_query = SELECT usename, passwd FROM public.pgbouncer_get_auth($1)
 The `auth_user` entry must be a plaintext password: PgBouncer logs in as that
 user itself and cannot do so from a verifier.
 
+`auth_query` runs in the client's target database, so `pgbouncer_get_auth`
+must exist in every database PgBouncer serves.
+
 **`auth_file` — managed PostgreSQL (RDS, Cloud SQL and others).** These grant
 no superuser, so nothing can read verifiers. Render the file instead.
 `mt.PgBouncerAuthFile` (and `database.WriteAuthFile`, which it calls) writes to
@@ -555,6 +567,10 @@ func renderAuthFile(ctx context.Context, mt *multitenant.MultiTenant, path strin
         return err
     }
     if err = mt.PgBouncerAuthFile(ctx, f); err != nil {
+        f.Close()
+        return err
+    }
+    if err = f.Sync(); err != nil {
         f.Close()
         return err
     }
