@@ -456,6 +456,8 @@ func TestIntegration_RoleIsolation_SuspendLocksOut(t *testing.T) {
 		c.Close(ctx)
 		if qerr == nil {
 			t.Error("a suspended tenant's role could still log in")
+		} else {
+			t.Logf("suspended role's first statement was refused with: %v", qerr)
 		}
 	}
 

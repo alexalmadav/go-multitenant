@@ -58,12 +58,16 @@ max_db_connections = 40
 server_login_retry = 1
 ignore_startup_parameters = extra_float_digits
 EOF
-chmod 644 "$dir"/*
+chmod 644 "$dir"/*  # CI only, throwaway credentials; 644 because the container user differs from the runner user
 
 # PgBouncer needs a descriptor per client and server connection; container
 # defaults of 1,024 are too low for per-tenant pools.
+# Pinned by digest: this is PgBouncer 1.25.2, the version the tests' auth
+# assumptions (the lockout guard, 08P01 "authentication failed") were verified
+# against. Re-verify them before changing it.
 docker run -d --name pgbouncer-role --network host --ulimit nofile=65536:65536 \
-  -v "$dir:/etc/pgbouncer" edoburu/pgbouncer:latest >/dev/null
+  -v "$dir:/etc/pgbouncer" \
+  edoburu/pgbouncer@sha256:4c1ca296ef525f108f5d3552cc337c0c09587cf8dae7f0067fd93349e47dc1cd >/dev/null
 
 for _ in $(seq 1 30); do
   (echo > /dev/tcp/127.0.0.1/6433) >/dev/null 2>&1 && exit 0
