@@ -85,7 +85,7 @@ Works with chi, gorilla/mux and anything else that takes `func(http.Handler) htt
 The Gin adapter is a separate module so the core does not depend on Gin:
 
 ```bash
-go get github.com/alexalmadav/go-multitenant/middleware/gin@v0.8.0
+go get github.com/alexalmadav/go-multitenant/middleware/gin@v0.9.0
 ```
 
 ```go
