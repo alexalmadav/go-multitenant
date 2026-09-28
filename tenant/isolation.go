@@ -3,6 +3,7 @@ package tenant
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -105,6 +106,14 @@ func (c RoleIsolationConfig) Validate(schemaPrefix string) error {
 		if len(s) < MinRoleSecretLen {
 			return fmt.Errorf("%w: PreviousSecrets[%d] is %d bytes, need at least %d", ErrInvalidRoleIsolation, i, len(s), MinRoleSecretLen)
 		}
+	}
+	// Role names are schema names. Quotes and NUL cannot appear in one, and
+	// PostgreSQL reserves the pg_ prefix: CREATE ROLE pg_* is refused.
+	if strings.ContainsAny(schemaPrefix, "\"\x00") {
+		return fmt.Errorf("%w: schema prefix %q must not contain a double quote or NUL", ErrInvalidRoleIsolation, schemaPrefix)
+	}
+	if strings.HasPrefix(schemaPrefix, "pg_") {
+		return fmt.Errorf("%w: schema prefix %q must not start with pg_, which PostgreSQL reserves for its own roles", ErrInvalidRoleIsolation, schemaPrefix)
 	}
 	if n := len(schemaPrefix) + tenantIDLen; n > maxIdentifierLen {
 		return fmt.Errorf("%w: schema prefix %q makes role names %d characters, over PostgreSQL's %d", ErrInvalidRoleIsolation, schemaPrefix, n, maxIdentifierLen)

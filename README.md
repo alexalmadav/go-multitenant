@@ -426,6 +426,15 @@ that link.
 Application code does not change: `GetTenantConn`, `WithTenantTx` and the
 middleware hand out connections logged in as the tenant's role.
 
+Three things to know:
+
+- Code that calls `mt.GetDatabase()` gets the admin pool, which is outside
+  role isolation. Keep it away from request handlers.
+- After a pending tenant is activated, regenerate the `auth_file` and `RELOAD`
+  PgBouncer, or the tenant's role cannot get a PgBouncer server connection.
+- `TenantDSN` should not embed a password. The library replaces its user and
+  password with the credentials it derives for each tenant.
+
 **Requirements.** PostgreSQL 15 or later — earlier versions let every role
 create tables in `public`. The admin role in `Database.DSN` must be a
 superuser, or have `CREATEROLE` and membership in `pg_signal_backend`, which it
@@ -622,7 +631,9 @@ func renderAuthFile(ctx context.Context, mt *multitenant.MultiTenant, path strin
 #### Rotating the secret
 
 1. Deploy with `Secret` set to the new key and `PreviousSecrets: [][]byte{old}`.
-   A pool that fails to authenticate with the new key retries with the old.
+   Every new connection tries the key that last worked first and falls back to
+   the others when authentication fails, so a pool opened before step 2 keeps
+   working after it.
 2. Run `mt.RotateTenantCredentials(ctx)`.
 3. With an `auth_file`, regenerate it and reload PgBouncer immediately.
 4. Remove the old key from `PreviousSecrets`.
