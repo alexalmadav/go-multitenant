@@ -11,22 +11,20 @@ import (
 	"go.uber.org/zap"
 )
 
-// fakeRoles records calls, and refuses to act on a role Ensure has not
-// created - the failure the original design would have hit on every first
-// provisioning.
+// fakeRoles records calls, in order, in one log shared with the hook's evict
+// callback. Like the real RoleManager, LockOut and Drop succeed for a role that
+// does not exist. Each method fails with its own error field, or with err.
 type fakeRoles struct {
-	calls   []string
-	created map[uuid.UUID]bool
-	err     error
+	calls     []string
+	err       error
+	ensureErr error
+	lockErr   error
+	dropErr   error
 }
 
 func (f *fakeRoles) Ensure(_ context.Context, t *tenant.Tenant) error {
 	f.calls = append(f.calls, "ensure:"+t.Status)
-	if f.created == nil {
-		f.created = map[uuid.UUID]bool{}
-	}
-	f.created[t.ID] = true
-	return f.err
+	return errors.Join(f.err, f.ensureErr)
 }
 
 func (f *fakeRoles) Grant(_ context.Context, id uuid.UUID) error {
@@ -36,35 +34,31 @@ func (f *fakeRoles) Grant(_ context.Context, id uuid.UUID) error {
 
 func (f *fakeRoles) LockOut(_ context.Context, id uuid.UUID) error {
 	f.calls = append(f.calls, "lockout")
-	if !f.created[id] {
-		return errors.New("role does not exist")
-	}
-	return f.err
+	return errors.Join(f.err, f.lockErr)
 }
 
 func (f *fakeRoles) Drop(_ context.Context, id uuid.UUID) error {
 	f.calls = append(f.calls, "drop")
-	return f.err
+	return errors.Join(f.err, f.dropErr)
 }
 
 // fakeSchemas embeds the interface so unused methods panic.
 type fakeSchemas struct {
 	tenant.SchemaManager
 	exists bool
+	err    error
 }
 
-func (f fakeSchemas) SchemaExists(context.Context, uuid.UUID) (bool, error) { return f.exists, nil }
+func (f fakeSchemas) SchemaExists(context.Context, uuid.UUID) (bool, error) { return f.exists, f.err }
 
-func newTestHook(exists bool) (*RoleHook, *fakeRoles, *[]uuid.UUID) {
-	roles := &fakeRoles{}
-	var evicted []uuid.UUID
-	h := NewRoleHook(roles, fakeSchemas{exists: exists}, func(id uuid.UUID) { evicted = append(evicted, id) }, zap.NewNop())
-	return h, roles, &evicted
+func newTestHook(schemas fakeSchemas, roles *fakeRoles) *RoleHook {
+	return NewRoleHook(roles, schemas, func(uuid.UUID) { roles.calls = append(roles.calls, "evict") }, zap.NewNop())
 }
 
 // ProvisionTenant fires OnTenantStatusChanged before OnTenantProvisioned.
 func TestRoleHookProvisioningInEitherEventOrder(t *testing.T) {
-	h, roles, _ := newTestHook(true)
+	roles := &fakeRoles{}
+	h := newTestHook(fakeSchemas{exists: true}, roles)
 	tn := &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusActive}
 	ctx := context.Background()
 
@@ -79,26 +73,70 @@ func TestRoleHookProvisioningInEitherEventOrder(t *testing.T) {
 	}
 }
 
-func TestRoleHookSuspensionLocksOutAndEvicts(t *testing.T) {
-	h, roles, evicted := newTestHook(true)
-	tn := &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusSuspended}
+// Suspension and cancellation lock out and evict before anything that can fail.
+func TestRoleHookLocksOutAndEvictsSuspendedAndCancelled(t *testing.T) {
+	for _, status := range []string{tenant.StatusSuspended, tenant.StatusCancelled} {
+		roles := &fakeRoles{}
+		h := newTestHook(fakeSchemas{exists: true}, roles)
+		tn := &tenant.Tenant{ID: uuid.New(), Status: status}
 
-	if err := h.OnTenantStatusChanged(context.Background(), tn, tenant.StatusActive); err != nil {
-		t.Fatal(err)
+		if err := h.OnTenantStatusChanged(context.Background(), tn, tenant.StatusActive); err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"lockout", "evict", "ensure:" + status}; !slices.Equal(roles.calls, want) {
+			t.Errorf("%s: calls = %q, want %q", status, roles.calls, want)
+		}
 	}
-	if want := []string{"ensure:suspended", "lockout"}; !slices.Equal(roles.calls, want) {
+}
+
+func TestRoleHookLocksOutWhenSchemaExistsFails(t *testing.T) {
+	boom := errors.New("schema lookup failed")
+	roles := &fakeRoles{}
+	h := newTestHook(fakeSchemas{err: boom}, roles)
+
+	err := h.OnTenantStatusChanged(context.Background(), &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusSuspended}, tenant.StatusActive)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the schema error", err)
+	}
+	if want := []string{"lockout", "evict"}; !slices.Equal(roles.calls, want) {
 		t.Errorf("calls = %q, want %q", roles.calls, want)
 	}
-	if !slices.Equal(*evicted, []uuid.UUID{tn.ID}) {
-		t.Errorf("evicted = %v, want the suspended tenant", *evicted)
+}
+
+func TestRoleHookLocksOutWhenEnsureFails(t *testing.T) {
+	boom := errors.New("ensure failed")
+	roles := &fakeRoles{ensureErr: boom}
+	h := newTestHook(fakeSchemas{exists: true}, roles)
+
+	err := h.OnTenantStatusChanged(context.Background(), &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusSuspended}, tenant.StatusActive)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the ensure error", err)
+	}
+	if want := []string{"lockout", "evict", "ensure:suspended"}; !slices.Equal(roles.calls, want) {
+		t.Errorf("calls = %q, want %q", roles.calls, want)
+	}
+}
+
+func TestRoleHookEvictsWhenLockOutFails(t *testing.T) {
+	boom := errors.New("lockout failed")
+	roles := &fakeRoles{lockErr: boom}
+	h := newTestHook(fakeSchemas{exists: true}, roles)
+
+	err := h.OnTenantStatusChanged(context.Background(), &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusSuspended}, tenant.StatusActive)
+	if !errors.Is(err, boom) {
+		t.Errorf("err = %v, want the lockout error", err)
+	}
+	if want := []string{"lockout", "evict", "ensure:suspended"}; !slices.Equal(roles.calls, want) {
+		t.Errorf("calls = %q, want %q", roles.calls, want)
 	}
 }
 
 // A status change for a tenant that was never provisioned has no schema to
 // grant on and no role to manage.
 func TestRoleHookIgnoresUnprovisionedTenants(t *testing.T) {
-	h, roles, _ := newTestHook(false)
-	if err := h.OnTenantStatusChanged(context.Background(), &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusSuspended}, tenant.StatusPending); err != nil {
+	roles := &fakeRoles{}
+	h := newTestHook(fakeSchemas{exists: false}, roles)
+	if err := h.OnTenantStatusChanged(context.Background(), &tenant.Tenant{ID: uuid.New(), Status: tenant.StatusActive}, tenant.StatusPending); err != nil {
 		t.Fatal(err)
 	}
 	if len(roles.calls) != 0 {
@@ -107,18 +145,18 @@ func TestRoleHookIgnoresUnprovisionedTenants(t *testing.T) {
 }
 
 func TestRoleHookDeletionEvictsThenDrops(t *testing.T) {
-	h, roles, evicted := newTestHook(true)
-	tn := &tenant.Tenant{ID: uuid.New()}
-	if err := h.OnTenantDeleted(context.Background(), tn); err != nil {
+	roles := &fakeRoles{}
+	h := newTestHook(fakeSchemas{exists: true}, roles)
+	if err := h.OnTenantDeleted(context.Background(), &tenant.Tenant{ID: uuid.New()}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(roles.calls, []string{"drop"}) || !slices.Equal(*evicted, []uuid.UUID{tn.ID}) {
-		t.Errorf("calls = %q, evicted = %v; want drop, and the tenant evicted", roles.calls, *evicted)
+	if want := []string{"evict", "drop"}; !slices.Equal(roles.calls, want) {
+		t.Errorf("calls = %q, want %q", roles.calls, want)
 	}
 }
 
 func TestRoleHookName(t *testing.T) {
-	h, _, _ := newTestHook(true)
+	h := newTestHook(fakeSchemas{exists: true}, &fakeRoles{})
 	if h.Name() != "role_isolation" {
 		t.Errorf("Name() = %q", h.Name())
 	}

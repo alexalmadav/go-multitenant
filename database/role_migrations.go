@@ -15,28 +15,26 @@ import (
 // role owns them or is a member of the role that does.
 type grantingMigrations struct {
 	tenant.MigrationManager
-	roles TenantRoles
-	repo  tenant.Repository
+	roles   TenantRoles
+	repo    tenant.Repository
+	schemas tenant.SchemaManager
 }
 
 // NewGrantingMigrationManager wraps inner so that each migration run is
-// followed by Grant for the tenants it touched.
-func NewGrantingMigrationManager(inner tenant.MigrationManager, roles TenantRoles, repo tenant.Repository) tenant.MigrationManager {
-	return &grantingMigrations{MigrationManager: inner, roles: roles, repo: repo}
+// followed by Grant for the tenants it touched, whether or not the run failed: a
+// failed migration may have created tables first.
+func NewGrantingMigrationManager(inner tenant.MigrationManager, roles TenantRoles, repo tenant.Repository, schemas tenant.SchemaManager) tenant.MigrationManager {
+	return &grantingMigrations{MigrationManager: inner, roles: roles, repo: repo, schemas: schemas}
 }
 
 func (g *grantingMigrations) ApplyMigration(ctx context.Context, tenantID uuid.UUID, m *tenant.Migration) error {
-	if err := g.MigrationManager.ApplyMigration(ctx, tenantID, m); err != nil {
-		return err
-	}
-	return g.roles.Grant(ctx, tenantID)
+	err := g.MigrationManager.ApplyMigration(ctx, tenantID, m)
+	return errors.Join(err, g.roles.Grant(ctx, tenantID))
 }
 
 func (g *grantingMigrations) ApplyPending(ctx context.Context, tenantID uuid.UUID) error {
-	if err := g.MigrationManager.ApplyPending(ctx, tenantID); err != nil {
-		return err
-	}
-	return g.roles.Grant(ctx, tenantID)
+	err := g.MigrationManager.ApplyPending(ctx, tenantID)
+	return errors.Join(err, g.roles.Grant(ctx, tenantID))
 }
 
 func (g *grantingMigrations) ApplyToAllTenants(ctx context.Context, m *tenant.Migration) error {
@@ -47,10 +45,10 @@ func (g *grantingMigrations) ApplyPendingToAllTenants(ctx context.Context) error
 	return errors.Join(g.MigrationManager.ApplyPendingToAllTenants(ctx), g.grantAll(ctx))
 }
 
-// grantAll grants for every tenant, even after a partly failed run, since
+// grantAll grants for every provisioned tenant, even after a partly failed run, since
 // the tenants it succeeded for have new tables.
 func (g *grantingMigrations) grantAll(ctx context.Context) error {
-	return forEachTenant(ctx, g.repo, func(t *tenant.Tenant) error {
+	return ForEachProvisionedTenant(ctx, g.repo, g.schemas, func(t *tenant.Tenant) error {
 		if err := g.roles.Grant(ctx, t.ID); err != nil {
 			return fmt.Errorf("tenant %s: %w", t.ID, err)
 		}

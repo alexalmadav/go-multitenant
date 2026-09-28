@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 
 	"github.com/alexalmadav/go-multitenant/tenant"
 	"github.com/google/uuid"
@@ -40,31 +41,39 @@ func (h *RoleHook) OnTenantProvisioned(ctx context.Context, t *tenant.Tenant) er
 	return h.roles.Ensure(ctx, t)
 }
 
-// OnTenantStatusChanged ensures the role for the new status, and for a
-// suspended or cancelled tenant also ends its sessions and closes its pool.
-// A tenant with no schema has not been provisioned, so there is nothing to do.
+// OnTenantStatusChanged ensures the role for the new status. For a suspended
+// or cancelled tenant it first ends the tenant's sessions and closes its pool,
+// and only then looks at the schema and the role: a lockout must not depend on
+// anything that can fail, and the pool is closed whether or not LockOut
+// succeeded. A tenant with no schema has not been provisioned, so there is no
+// role to ensure. Every error is returned.
 func (h *RoleHook) OnTenantStatusChanged(ctx context.Context, t *tenant.Tenant, _ string) error {
-	provisioned, err := h.schemas.SchemaExists(ctx, t.ID)
-	if err != nil {
-		return err
-	}
-	if !provisioned {
-		return nil
-	}
-	if err := h.roles.Ensure(ctx, t); err != nil {
-		return err
-	}
+	var errs []error
 	if t.Status == tenant.StatusSuspended || t.Status == tenant.StatusCancelled {
 		if err := h.roles.LockOut(ctx, t.ID); err != nil {
-			return err
+			h.logger.Warn("Lock out of tenant role failed", zap.String("tenant_id", t.ID.String()), zap.Error(err))
+			errs = append(errs, err)
 		}
 		h.evict(t.ID)
 	}
-	return nil
+	provisioned, err := h.schemas.SchemaExists(ctx, t.ID)
+	if err != nil {
+		return errors.Join(append(errs, err)...)
+	}
+	if provisioned {
+		if err := h.roles.Ensure(ctx, t); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // OnTenantDeleted closes the tenant's pool and drops its role.
 func (h *RoleHook) OnTenantDeleted(ctx context.Context, t *tenant.Tenant) error {
 	h.evict(t.ID)
-	return h.roles.Drop(ctx, t.ID)
+	err := h.roles.Drop(ctx, t.ID)
+	if err != nil {
+		h.logger.Warn("Drop of tenant role failed", zap.String("tenant_id", t.ID.String()), zap.Error(err))
+	}
+	return err
 }
