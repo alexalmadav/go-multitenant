@@ -72,8 +72,9 @@ func (rm *RoleManager) CheckPrerequisites(ctx context.Context) error {
 }
 
 // Ensure brings t's role to the state its record calls for: created if
-// missing, with the current password, LOGIN if the tenant is active and
-// NOLOGIN otherwise, and DML on every table and sequence in its schema, now
+// missing, with the current password, LOGIN if the tenant is active in the
+// registry (re-read under the role lock, not taken from t) and NOLOGIN
+// otherwise, in which case its sessions are ended too, and DML on every table and sequence in its schema, now
 // and in future. The tenant's schema must exist.
 func (rm *RoleManager) Ensure(ctx context.Context, t *tenant.Tenant) error {
 	role := quoteIdent(rm.creds.RoleName(t.ID))
@@ -90,10 +91,6 @@ func (rm *RoleManager) Ensure(ctx context.Context, t *tenant.Tenant) error {
 		}
 		password = quoteLiteral(verifier)
 	}
-	login := "NOLOGIN"
-	if t.Status == tenant.StatusActive {
-		login = "LOGIN"
-	}
 
 	tx, err := rm.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -105,6 +102,23 @@ func (rm *RoleManager) Ensure(ctx context.Context, t *tenant.Tenant) error {
 	// callers can both see the role as missing and one CREATE ROLE fails.
 	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, cred.User); err != nil {
 		return fmt.Errorf("database: ensure role %s: %w", cred.User, err)
+	}
+
+	// Decide LOGIN from the registry, not from t: t is a snapshot that a
+	// suspension on another instance may have overtaken. A LockOut that
+	// committed before this lock is visible here; one that comes later waits
+	// for this transaction and then applies NOLOGIN.
+	var status string
+	switch err := tx.QueryRowContext(ctx, `SELECT status FROM public.tenants WHERE id = $1`, t.ID).Scan(&status); {
+	case errors.Is(err, sql.ErrNoRows):
+		// A tenant with no record is not active.
+	case err != nil:
+		return fmt.Errorf("database: ensure role %s: read tenant status: %w", cred.User, err)
+	}
+	active := status == string(tenant.StatusActive)
+	login := "NOLOGIN"
+	if active {
+		login = "LOGIN"
 	}
 
 	exists, err := roleExists(ctx, tx, cred.User)
@@ -137,6 +151,11 @@ func (rm *RoleManager) Ensure(ctx context.Context, t *tenant.Tenant) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("database: ensure role %s: %w", cred.User, err)
 	}
+	if !active {
+		if _, err := rm.terminateSessions(ctx, cred.User); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -165,16 +184,39 @@ func (rm *RoleManager) LockOut(ctx context.Context, tenantID uuid.UUID) error {
 	if err != nil || !exists {
 		return err
 	}
-	if _, err := rm.db.ExecContext(ctx, "ALTER ROLE "+quoteIdent(name)+" NOLOGIN"); err != nil {
+	// Under the same lock as Ensure, so a stale Ensure cannot re-enable the
+	// login after this commits.
+	tx, err := rm.db.BeginTx(ctx, nil)
+	if err != nil {
 		return fmt.Errorf("database: lock out %s: %w", name, err)
 	}
-	var ended int
-	if err := rm.db.QueryRowContext(ctx,
-		`SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = $1`, name).Scan(&ended); err != nil {
-		return fmt.Errorf("database: end sessions of %s: %w", name, err)
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, name); err != nil {
+		return fmt.Errorf("database: lock out %s: %w", name, err)
+	}
+	if _, err := tx.ExecContext(ctx, "ALTER ROLE "+quoteIdent(name)+" NOLOGIN"); err != nil {
+		return fmt.Errorf("database: lock out %s: %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("database: lock out %s: %w", name, err)
+	}
+	ended, err := rm.terminateSessions(ctx, name)
+	if err != nil {
+		return err
 	}
 	rm.logger.Info("Locked out tenant role", zap.String("role", name), zap.Int("sessions_ended", ended))
 	return nil
+}
+
+// terminateSessions ends every session of role, including connections a
+// pooler holds on its behalf, and returns how many it ended.
+func (rm *RoleManager) terminateSessions(ctx context.Context, role string) (int, error) {
+	var ended int
+	if err := rm.db.QueryRowContext(ctx,
+		`SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = $1`, role).Scan(&ended); err != nil {
+		return 0, fmt.Errorf("database: end sessions of %s: %w", role, err)
+	}
+	return ended, nil
 }
 
 // Drop locks the tenant's role out, revokes everything granted to it, and

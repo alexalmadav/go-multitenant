@@ -688,3 +688,91 @@ func TestIntegration_RoleIsolation_PgBouncerLockoutGuard(t *testing.T) {
 	}
 	c.Close(context.Background())
 }
+
+// TestIntegration_RoleManager_EnsureUsesRegistryStatus checks that Ensure
+// decides LOGIN from the registry, not from the tenant value it is given: a
+// stale active snapshot of a suspended tenant must leave the role NOLOGIN.
+func TestIntegration_RoleManager_EnsureUsesRegistryStatus(t *testing.T) {
+	db := setupTestDatabase(t)
+	ctx := context.Background()
+	mt, err := New(testConfig(getTestDatabaseURL()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mt.Close()
+	id, roles := provisionRoleTestTenant(t, db, mt, "ensure-registry")
+	stale, err := mt.Manager.GetTenant(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale.Status != tenant.StatusActive {
+		t.Fatalf("setup: status %q, want active", stale.Status)
+	}
+	canLogin := func() bool {
+		var b bool
+		if err := db.QueryRow(`SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, testRoleName(id)).Scan(&b); err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	if err := roles.Ensure(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if !canLogin() {
+		t.Fatal("an active tenant's role is NOLOGIN after Ensure")
+	}
+	// Suspended elsewhere; stale still says active.
+	if _, err := db.Exec(`UPDATE public.tenants SET status = 'suspended' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := roles.Ensure(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if canLogin() {
+		t.Error("Ensure with a stale active tenant re-enabled the login of a suspended tenant")
+	}
+}
+
+// TestIntegration_RoleManager_EnsureEndsSessionsWhenNotActive checks that
+// Ensure on a tenant that is not active ends the role's live sessions.
+func TestIntegration_RoleManager_EnsureEndsSessionsWhenNotActive(t *testing.T) {
+	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
+	ctx := context.Background()
+	mt, err := New(testConfig(getTestDatabaseURL()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mt.Close()
+	id, roles := provisionRoleTestTenant(t, db, mt, "ensure-ends")
+	tn, err := mt.Manager.GetTenant(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := roles.Ensure(ctx, tn); err != nil {
+		t.Fatal(err)
+	}
+	creds := tenant.NewCredentialSource(tenant.RoleIsolationConfig{Secret: testRoleSecret}, database.NewSchemaManager(db, zap.NewNop(), "tenant_").GetSchemaName)
+	cred, err := creds.Current(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := connectAsRole(t, getTestDatabaseURL(), cred)
+	if err != nil {
+		t.Fatalf("the active tenant's role could not log in: %v", err)
+	}
+	defer conn.Close(ctx)
+	if _, err := conn.Exec(ctx, "SELECT 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.Exec(`UPDATE public.tenants SET status = 'suspended' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := roles.Ensure(ctx, tn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(ctx, "SELECT 1"); err == nil {
+		t.Error("the role's session survived Ensure on a suspended tenant")
+	}
+}
