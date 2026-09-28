@@ -519,6 +519,28 @@ func TestIntegration_RoleIsolation_Rotation(t *testing.T) {
 	}
 	refreshPgBouncerAuth(t, mtBoth)
 
+	// The pool mtBoth opened before rotation authenticated with the old
+	// secret. Holding several connections at once forces new physical
+	// connections, which must now log in with the new one.
+	ctx := context.Background()
+	var held []*tenant.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for i := 0; i < 3; i++ {
+		c, err := mtBoth.Manager.GetTenantConn(ctx, id)
+		if err != nil {
+			t.Fatalf("connection %d on the warm pool after rotation: %v", i, err)
+		}
+		held = append(held, c)
+		var user string
+		if err := eventually(func() error { return c.QueryRowContext(ctx, "SELECT current_user").Scan(&user) }); err != nil {
+			t.Fatalf("query %d on the warm pool after rotation: %v", i, err)
+		}
+	}
+
 	// Step 5: only the new key.
 	if _, err := currentUser(t, newRoleModeMT(t, newSecret), id); err != nil {
 		t.Errorf("after rotation, with only the new secret: %v", err)

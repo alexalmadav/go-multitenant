@@ -3,9 +3,11 @@ package multitenant
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io"
+	"sync/atomic"
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/tenant"
@@ -64,32 +66,64 @@ func tenantPoolOpener(cfg tenant.RoleIsolationConfig, creds *tenant.CredentialSo
 		if err != nil {
 			return nil, err
 		}
-		var lastErr error
-		for i, c := range candidates {
+		rc := &rotatingConnector{role: candidates[0].User, logger: logger}
+		for _, c := range candidates {
 			connCfg := base.Copy()
 			connCfg.User, connCfg.Password = c.User, c.Password
 			connCfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-			db := stdlib.OpenDB(*connCfg)
-			db.SetMaxOpenConns(cfg.PerTenantMaxConns)
-			db.SetMaxIdleConns(1)
-			db.SetConnMaxIdleTime(cfg.IdleTimeout)
-			err := db.PingContext(ctx)
-			if err == nil {
-				if i > 0 {
-					logger.Warn("A tenant role authenticated with a previous secret; run RotateTenantCredentials",
-						zap.String("role", c.User), zap.Int("previous_secret", i))
-				}
-				return db, nil
-			}
-			db.Close()
-			lastErr = err
-			if !tenant.IsAuthFailure(err) {
-				break
-			}
+			rc.connectors = append(rc.connectors, stdlib.GetConnector(*connCfg))
 		}
-		return nil, fmt.Errorf("multitenant: tenant role %s could not log in at TenantDSN; check that EnsureTenantRoles has run, "+
-			"that Secret matches, and, behind PgBouncer with an auth_file, that the file is current: %w", candidates[0].User, lastErr)
+		db := sql.OpenDB(rc)
+		db.SetMaxOpenConns(cfg.PerTenantMaxConns)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxIdleTime(cfg.IdleTimeout)
+		if err := db.PingContext(ctx); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("multitenant: tenant role %s could not log in at TenantDSN; check that EnsureTenantRoles has run, "+
+				"that Secret matches, and, behind PgBouncer with an auth_file, that the file is current: %w", candidates[0].User, err)
+		}
+		return db, nil
 	}, nil
+}
+
+// rotatingConnector is a driver.Connector over one connector per candidate
+// credential. good is the index of the candidate that last logged in.
+type rotatingConnector struct {
+	role       string
+	logger     *zap.Logger
+	connectors []driver.Connector
+	good       atomic.Int64
+}
+
+func (r *rotatingConnector) Driver() driver.Driver { return r.connectors[0].Driver() }
+
+// Connect tries the candidate that last worked, then the others in order,
+// moving on only after an authentication failure.
+func (r *rotatingConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	first := int(r.good.Load())
+	order := make([]int, 0, len(r.connectors))
+	order = append(order, first)
+	for i := range r.connectors {
+		if i != first {
+			order = append(order, i)
+		}
+	}
+	var lastErr error
+	for _, i := range order {
+		conn, err := r.connectors[i].Connect(ctx)
+		if err == nil {
+			if old := int(r.good.Swap(int64(i))); old != i && i > 0 {
+				r.logger.Warn("A tenant role authenticated with a previous secret; run RotateTenantCredentials",
+					zap.String("role", r.role), zap.Int("previous_secret", i))
+			}
+			return conn, nil
+		}
+		lastErr = err
+		if !tenant.IsAuthFailure(err) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
 }
 
 // EnsureTenantRoles brings every provisioned tenant's role to the state its
