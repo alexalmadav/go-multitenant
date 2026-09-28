@@ -194,7 +194,7 @@ type RoleIsolationConfig struct {
 	PreviousSecrets [][]byte `json:"-"`
 
 	// Credentials replaces the derived-password scheme when set.
-	Credentials func(tenantID uuid.UUID) (user, password string, err error) `json:"-"`
+	Credentials func(tenantID uuid.UUID) (password string, err error) `json:"-"`
 
 	MaxConns          int           // connections in use at once, all tenants; default 50
 	PerTenantMaxConns int           // connections in use at once, one tenant; default 5
@@ -208,6 +208,11 @@ pool's idle connection is cheap. Pointed straight at Postgres, each warm pool
 holds a real backend, and `MaxConns + MaxWarmTenants` must fit inside
 `max_connections` alongside the admin pool — the default 1,050 would not. The
 field documentation and README say this plainly, with the arithmetic.
+
+The `Credentials` hook returns a password only. The role name is always the
+tenant's schema name, because grants, lockout and the auth file all address
+the role by it; a hook-chosen name would have to be consulted by every one
+of them.
 
 `multitenant.New` rejects role mode when `TenantDSN` is empty, the secret is
 shorter than 32 bytes and no `Credentials` hook is set, or the server is older
@@ -393,10 +398,11 @@ say — tables they create are not granted, and tenants start getting
 *permission denied* at runtime. That fails closed, but it is an outage.
 
 The granting-migrations decorator reapplies the two backfill grants for each
-tenant after every `ApplyMigration`, `ApplyPending`,
-`ApplyToAllTenants` and `ApplyPendingToAllTenants`, whoever created the
-tables. Default privileges remain the first line; the decorator is the
-guarantee.
+tenant after every `ApplyMigration`, `ApplyPending`, `ApplyToAllTenants` and
+`ApplyPendingToAllTenants`. A role can grant only on tables it owns or whose
+owner it is a member of, so this covers tables created by another user only
+when the admin role is a member of that user's role; migrations run by an
+unrelated user remain unsupported, and the README says so.
 
 ### Tenant pools and request flow
 
