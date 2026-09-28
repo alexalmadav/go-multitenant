@@ -50,6 +50,8 @@ func statusForCode(code string) int {
 		return http.StatusUnauthorized
 	case "ACCESS_DENIED":
 		return http.StatusForbidden
+	case "TENANT_DB_BUSY":
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
