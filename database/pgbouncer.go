@@ -1,7 +1,9 @@
 package database
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -20,12 +22,14 @@ import (
 // contains only tenant entries; a deployment adds its own fixed entries, such
 // as the admin user.
 //
-// Nothing is written to w unless every entry could be rendered. The caller
-// owns the destination: write it to a file with mode 0600, and replace the
-// live file atomically (write a temporary file in the same directory, then
-// rename it) so PgBouncer never reads a partial file.
+// auth_file has no escape for a line break, so a role or password containing
+// NUL, CR or LF is rejected, naming the role only. On error, w must be
+// discarded; write to a temp file with mode 0600 and rename. The whole file is
+// rendered first and written to w with a single Write call.
 func WriteAuthFile(ctx context.Context, w io.Writer, repo tenant.Repository, schemas tenant.SchemaManager, creds *tenant.CredentialSource) error {
-	var lines, passwordless []string
+	type entry struct{ user, line string }
+	var entries []entry
+	var problems []error
 	err := ForEachProvisionedTenant(ctx, repo, schemas, func(t *tenant.Tenant) error {
 		if t.Status != tenant.StatusActive {
 			return nil
@@ -34,28 +38,34 @@ func WriteAuthFile(ctx context.Context, w io.Writer, repo tenant.Repository, sch
 		if err != nil {
 			return err
 		}
-		if cred.Password == "" {
-			passwordless = append(passwordless, cred.User)
-			return nil
+		switch {
+		case cred.Password == "":
+			problems = append(problems, fmt.Errorf("database: tenant role %q has no password and cannot authenticate through an auth_file", cred.User))
+		case strings.ContainsAny(cred.User, authFileForbidden) || strings.ContainsAny(cred.Password, authFileForbidden):
+			problems = append(problems, fmt.Errorf("database: tenant role %q has a name or password containing a NUL or line break, which an auth_file cannot represent", cred.User))
+		default:
+			entries = append(entries, entry{cred.User, quoteAuthFile(cred.User) + " " + quoteAuthFile(cred.Password)})
 		}
-		lines = append(lines, quoteAuthFile(cred.User)+" "+quoteAuthFile(cred.Password))
 		return nil
 	})
 	if err != nil {
-		return err
+		return errors.Join(append(problems, err)...)
 	}
-	if len(passwordless) > 0 {
-		return fmt.Errorf("database: %d tenant role(s) have no password and cannot authenticate through an auth_file: %s",
-			len(passwordless), strings.Join(passwordless, ", "))
+	if len(problems) > 0 {
+		return errors.Join(problems...)
 	}
-	sort.Strings(lines)
-	for _, l := range lines {
-		if _, err := fmt.Fprintln(w, l); err != nil {
-			return err
-		}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].user < entries[j].user })
+	var buf bytes.Buffer
+	for _, e := range entries {
+		buf.WriteString(e.line)
+		buf.WriteByte('\n')
 	}
-	return nil
+	_, err = w.Write(buf.Bytes())
+	return err
 }
+
+// authFileForbidden lists the characters an auth_file value cannot carry.
+const authFileForbidden = "\x00\r\n"
 
 // quoteAuthFile quotes a value the way PgBouncer's auth_file expects, with
 // embedded double quotes doubled.
