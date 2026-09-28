@@ -389,15 +389,15 @@ func TestIntegration_RoleIsolation_MigrationRunGrantsOtherOwnersTables(t *testin
 	defer dropTestRoles(db, []uuid.UUID{id})
 
 	schema := `"` + testRoleName(id) + `"`
+	migrator := "role_test_migrator_" + uuid.NewString()[:8]
 	admin, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range []string{
-		"DROP ROLE IF EXISTS role_test_migrator",
-		"CREATE ROLE role_test_migrator NOLOGIN",
-		"GRANT USAGE, CREATE ON SCHEMA " + schema + " TO role_test_migrator",
-		"SET ROLE role_test_migrator",
+		"CREATE ROLE " + migrator + " NOLOGIN",
+		"GRANT USAGE, CREATE ON SCHEMA " + schema + " TO " + migrator,
+		"SET ROLE " + migrator,
 		"CREATE TABLE " + schema + ".gadgets (id int)",
 		"RESET ROLE",
 	} {
@@ -406,7 +406,7 @@ func TestIntegration_RoleIsolation_MigrationRunGrantsOtherOwnersTables(t *testin
 		}
 	}
 	admin.Close()
-	defer db.Exec("DROP TABLE IF EXISTS " + schema + ".gadgets; DROP OWNED BY role_test_migrator; DROP ROLE IF EXISTS role_test_migrator")
+	defer db.Exec("DROP TABLE IF EXISTS " + schema + ".gadgets; DROP OWNED BY " + migrator + "; DROP ROLE IF EXISTS " + migrator)
 
 	query := func() error {
 		conn, err := mt.Manager.GetTenantConn(ctx, id)
@@ -560,11 +560,14 @@ func TestIntegration_RoleIsolation_EnsureRepairsAndSkips(t *testing.T) {
 // roleTestTenantDSN does not check passwords. Role isolation's login-dependent
 // guarantees mean nothing on a trust-auth server, where any password logs in.
 // It probes with a throwaway LOGIN role and a deliberately wrong password.
+// Behind a PgBouncer TenantDSN the probe role is absent from the auth_file, and
+// PgBouncer checks passwords itself, so the wrong password is refused there
+// too, as 08P01 "authentication failed".
 // Call it after setupTestDatabase.
 func requirePasswordAuth(t *testing.T) {
 	t.Helper()
 	ctx := context.Background()
-	const probe = "role_test_authprobe"
+	probe := "role_test_authprobe_" + uuid.NewString()[:8]
 	admin, err := pgx.Connect(ctx, getTestDatabaseURL())
 	if err != nil {
 		t.Fatalf("requirePasswordAuth: connect as admin: %v", err)
@@ -585,20 +588,34 @@ func requirePasswordAuth(t *testing.T) {
 		}
 		t.Skip(msg)
 	}
-	if !tenant.IsAuthFailure(err) {
-		t.Fatalf("requirePasswordAuth: wrong password failed with something other than an authentication failure: %v", err)
+	// Only a rejected password proves the server checks passwords. Any other
+	// failure, such as 28000 "role does not exist", proves nothing.
+	var pe *pgconn.PgError
+	if !errors.As(err, &pe) || !(pe.Code == "28P01" || (pe.Code == "08P01" && strings.Contains(strings.ToLower(pe.Message), "authentication failed"))) {
+		t.Fatalf("requirePasswordAuth: wrong password failed with something other than a rejected password: %v", err)
 	}
 }
 
+// A connection request after Close must fail promptly. The tenant is real and
+// its pool live before Close, so the failure is Close's doing and not a login
+// failure for a tenant that has no role.
 func TestIntegration_RoleIsolation_OperationsAfterClose(t *testing.T) {
-	setupTestDatabase(t)
+	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	mt := newRoleModeMT(t, testRoleSecret)
+	id := provisionForRoleTest(t, mt, "role-after-close")
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+
+	if _, err := currentUser(t, mt, id); err != nil {
+		t.Fatalf("before Close: %v", err)
+	}
 	if err := mt.Close(); err != nil {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
 	go func() {
-		conn, err := mt.Manager.GetTenantConn(context.Background(), uuid.New())
+		conn, err := mt.Manager.GetTenantConn(context.Background(), id)
 		if err == nil {
 			conn.Close()
 		}

@@ -325,6 +325,9 @@ func TestIntegration_RoleIsolation_CrossTenantAccessIsRefused(t *testing.T) {
 // cold pool open. It runs before anything else has used a tenant connection.
 func assertRoleConnections(t *testing.T, mt *MultiTenant, ids []uuid.UUID) {
 	t.Helper()
+	if len(ids) < 2 {
+		t.Fatalf("assertRoleConnections needs at least two tenants to check cross-tenant refusal, got %d", len(ids))
+	}
 	ctx := context.Background()
 	for i, id := range ids {
 		other := ids[(i+1)%len(ids)]
