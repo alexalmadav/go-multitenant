@@ -449,9 +449,14 @@ func TestIntegration_RoleIsolation_SuspendLocksOut(t *testing.T) {
 	if _, err := session.Exec(ctx, "SELECT 1"); err == nil {
 		t.Error("an open session kept working after its tenant was suspended")
 	}
+	// PgBouncer authenticates a client without a server connection, so behind
+	// it a refused role only shows on the first statement.
 	if c, err := connectAsRole(t, roleTestTenantDSN(), cred); err == nil {
+		_, qerr := c.Exec(ctx, "SELECT 1")
 		c.Close(ctx)
-		t.Error("a suspended tenant's role could still log in")
+		if qerr == nil {
+			t.Error("a suspended tenant's role could still log in")
+		}
 	}
 
 	if err := mt.Manager.ActivateTenant(ctx, id); err != nil {
@@ -629,4 +634,33 @@ func TestIntegration_RoleIsolation_OperationsAfterClose(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("GetTenantConn hung after Close")
 	}
+}
+
+// TestIntegration_RoleIsolation_PgBouncerLockoutGuard runs only in the CI
+// jobs with PgBouncer. A role whose first login since PgBouncer started is a
+// failure must still log in with the right password afterwards. PgBouncer
+// 1.25.2 breaks this when its auth_file holds SCRAM verifiers, so this test
+// fails if the auth_file is ever switched to verifiers.
+func TestIntegration_RoleIsolation_PgBouncerLockoutGuard(t *testing.T) {
+	if os.Getenv("PGBOUNCER_MODE") == "" {
+		t.Skip("runs only through PgBouncer; set PGBOUNCER_MODE")
+	}
+	db := setupTestDatabase(t)
+	mt := newRoleModeMT(t, testRoleSecret)
+	id := provisionForRoleTest(t, mt, "role-lockout-guard") // a role PgBouncer has never seen
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+
+	wrong := tenant.RoleCredentials{User: testRoleName(id), Password: "not-the-password"}
+	if c, err := connectAsRole(t, roleTestTenantDSN(), wrong); err == nil {
+		c.Close(context.Background())
+		t.Fatal("PgBouncer accepted a wrong password")
+	}
+
+	right := tenant.RoleCredentials{User: testRoleName(id), Password: tenant.DerivePassword(testRoleSecret, id)}
+	c, err := connectAsRole(t, roleTestTenantDSN(), right)
+	if err != nil {
+		t.Fatalf("after one failed first login, the correct password was refused: %v", err)
+	}
+	c.Close(context.Background())
 }
