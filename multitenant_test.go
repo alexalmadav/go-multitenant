@@ -26,6 +26,8 @@ func TestNew_InvalidConfig(t *testing.T) {
 						DSN: "invalid-dsn",
 					},
 				},
+				// Get past the membership decision so the DSN is what fails.
+				InsecureSkipMembership: true,
 			},
 		},
 	}
@@ -34,7 +36,10 @@ func TestNew_InvalidConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New(tt.config)
 			if err == nil {
-				t.Error("New() should return error for invalid config")
+				t.Fatal("New() should return error for invalid config")
+			}
+			if !strings.Contains(err.Error(), "failed to setup database") {
+				t.Errorf("New() should fail on the DSN, got: %v", err)
 			}
 		})
 	}
@@ -359,6 +364,7 @@ func TestNew_RejectsMissingMigrationsDir(t *testing.T) {
 	config := DefaultConfig()
 	config.Database.DSN = "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
 	config.Database.MigrationsDir = filepath.Join(t.TempDir(), "does-not-exist")
+	config.InsecureSkipMembership = true
 
 	_, err := New(config)
 	if err == nil {

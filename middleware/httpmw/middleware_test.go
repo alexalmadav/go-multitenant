@@ -526,3 +526,95 @@ func TestLogAccess_ForwardedClientIPOptIn(t *testing.T) {
 		t.Errorf("client_ip = %v, want 203.0.113.9", got)
 	}
 }
+
+func TestResolveTenantSkipsConfiguredHost(t *testing.T) {
+	failing := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+		return uuid.Nil, errors.New("resolver must not be called for a skipped host")
+	}}
+	mw := New(&stubManager{}, failing, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}})
+
+	req := httptest.NewRequest(http.MethodGet, "/login", nil)
+	req.Host = "auth.app.com"
+	code, _ := serve(t, mw.ResolveTenant()(okHandler()), req)
+
+	if code != http.StatusOK {
+		t.Errorf("status = %d, want %d", code, http.StatusOK)
+	}
+}
+
+// Host matching ignores the port and case, since neither is part of the
+// operator's intent.
+func TestSkipHostIgnoresPortAndCase(t *testing.T) {
+	failing := &stubResolver{resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+		return uuid.Nil, errors.New("resolver must not be called for a skipped host")
+	}}
+	mw := New(&stubManager{}, failing, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}})
+
+	for _, host := range []string{"auth.app.com:8443", "AUTH.App.com"} {
+		req := httptest.NewRequest(http.MethodGet, "/login", nil)
+		req.Host = host
+		if code, _ := serve(t, mw.ResolveTenant()(okHandler()), req); code != http.StatusOK {
+			t.Errorf("host %q: status = %d, want %d", host, code, http.StatusOK)
+		}
+	}
+}
+
+func TestSkipHostDoesNotSkipOtherHosts(t *testing.T) {
+	mw := New(&stubManager{}, &stubResolver{
+		resolve: func(context.Context, *http.Request) (uuid.UUID, error) {
+			return uuid.Nil, errors.New("no tenant")
+		},
+	}, zap.NewNop(), Config{SkipHosts: []string{"auth.app.com"}})
+
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Host = "acme.app.com"
+	code, body := serve(t, mw.ResolveTenant()(okHandler()), req)
+
+	if code != http.StatusNotFound {
+		t.Errorf("status = %d, want %d", code, http.StatusNotFound)
+	}
+	if got := errorCode(body); got != "TENANT_NOT_FOUND" {
+		t.Errorf("code = %q, want TENANT_NOT_FOUND", got)
+	}
+}
+
+// A skip list must not disable a status check for a request that already
+// carries a resolved tenant: shouldSkip re-reads r.URL.Path and r.Host, which
+// a rewrite such as http.StripPrefix can change between ResolveTenant and
+// here, and SetTenantDB downstream would still scope the request to that
+// tenant's schema. Restoring the original skip-first ordering fails this test
+// and nothing else.
+func TestValidateTenantEnforcesAResolvedTenantOnASkippedPath(t *testing.T) {
+	id := uuid.New()
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{SkipPaths: []string{"/health"}})
+
+	h := Chain(okHandler(), withTenant(id, tenant.StatusSuspended), mw.ValidateTenant())
+	code, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d - a skipped path let a suspended tenant through", code, http.StatusForbidden)
+	}
+	if got := errorCode(body); got != "TENANT_SUSPENDED" {
+		t.Errorf("code = %q, want TENANT_SUSPENDED", got)
+	}
+}
+
+// The same rule for plan limits: an over-limit tenant that has been resolved
+// is refused even on a skipped path.
+func TestEnforceLimitsEnforcesAResolvedTenantOnASkippedPath(t *testing.T) {
+	id := uuid.New()
+	over := stubEnforcer{func(context.Context, uuid.UUID) (limits.FlexibleLimits, error) {
+		return nil, &tenant.TenantError{Code: "LIMIT_EXCEEDED", Message: "project limit reached"}
+	}}
+	mw := New(&stubManager{}, nil, zap.NewNop(), Config{SkipPaths: []string{"/health"}}, WithLimits(over))
+
+	h := Chain(okHandler(), withTenant(id, tenant.StatusActive), mw.EnforceLimits())
+	code, body := serve(t, h, httptest.NewRequest(http.MethodGet, "/health", nil))
+
+	if code != http.StatusPaymentRequired {
+		t.Errorf("status = %d, want %d - a skipped path let an over-limit tenant through", code, http.StatusPaymentRequired)
+	}
+	if got := errorCode(body); got != "PLAN_LIMIT_EXCEEDED" {
+		t.Errorf("code = %q, want PLAN_LIMIT_EXCEEDED", got)
+	}
+}

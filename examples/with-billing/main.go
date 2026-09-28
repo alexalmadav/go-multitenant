@@ -18,6 +18,13 @@ import (
 func main() {
 	// Create configuration with custom limits for different plans
 	config := multitenant.DefaultConfig()
+	// This example has no authentication, so it opts out of the membership
+	// check on the record. A real Gin application sets config.Membership,
+	// passes the same value as ginmiddleware.Config{Membership: ...} - the
+	// adapter does not read config.Membership - and adds RequireMembership()
+	// to its chain after auth and ResolveTenant. See the README's Access
+	// Control section.
+	config.InsecureSkipMembership = true
 
 	// Configure database. MigrationsDir points at this app's migration files,
 	// which define the "projects" and "tenant_users" tables that UsageTables

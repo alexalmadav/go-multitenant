@@ -200,3 +200,60 @@ func TestAdapter_DownstreamHandlersRunInsideCoreNext(t *testing.T) {
 		t.Errorf("order = %v, want %s", order, want)
 	}
 }
+
+func TestAdapter_RequireMembershipDeniesANonMember(t *testing.T) {
+	id := uuid.New()
+	mw := NewMiddleware(&stubManager{}, nil, zap.NewNop(), Config{
+		Membership: tenant.MembershipFunc(func(context.Context, string, uuid.UUID) error {
+			return tenant.ErrNotMember
+		}),
+	})
+
+	setCaller := func(c *gin.Context) {
+		ctx := context.WithValue(c.Request.Context(), tenant.ContextKeyTenant,
+			&tenant.Context{TenantID: id, Status: tenant.StatusActive})
+		c.Request = c.Request.WithContext(tenant.WithPrincipal(ctx, tenant.Principal{Subject: "u-1"}))
+		c.Next()
+	}
+
+	r := newRouter(mw, setCaller, mw.RequireMembership())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+// The existing c.Set("user_id", ...) bridge satisfies the principal
+// requirement, so Gin applications that already set it need no change.
+func TestAdapter_RequireMembershipAcceptsTheUserIDBridge(t *testing.T) {
+	id := uuid.New()
+	var gotSubject string
+	mw := NewMiddleware(&stubManager{}, nil, zap.NewNop(), Config{
+		Membership: tenant.MembershipFunc(func(_ context.Context, subject string, _ uuid.UUID) error {
+			gotSubject = subject
+			return nil
+		}),
+	})
+
+	setCaller := func(c *gin.Context) {
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(),
+			tenant.ContextKeyTenant, &tenant.Context{TenantID: id, Status: tenant.StatusActive}))
+		c.Set("user_id", "u-2")
+		c.Next()
+	}
+
+	r := newRouter(mw, setCaller, mw.RequireMembership())
+	r.GET("/", func(c *gin.Context) { c.Status(http.StatusOK) })
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if gotSubject != "u-2" {
+		t.Errorf("subject = %q, want u-2", gotSubject)
+	}
+}
