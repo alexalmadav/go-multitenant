@@ -70,6 +70,9 @@ func runCrossTenantScenario(t *testing.T, cfg Config, afterProvision func(*Multi
 	// The caller builds cfg before setupTestDatabase has chosen a database, so
 	// the DSNs are filled in here, once the database is known.
 	cfg.Database.DSN = getTestDatabaseURL()
+	if cfg.Database.Isolation == tenant.IsolationRole {
+		requirePasswordAuth(t)
+	}
 	if cfg.Database.Isolation == tenant.IsolationRole && cfg.Database.RoleIsolation.TenantDSN == "" {
 		cfg.Database.RoleIsolation.TenantDSN = roleTestTenantDSN()
 	}
@@ -101,6 +104,11 @@ func runCrossTenantScenario(t *testing.T, cfg Config, afterProvision func(*Multi
 	}
 	if afterProvision != nil {
 		afterProvision(mt)
+	}
+	if cfg.Database.Isolation == tenant.IsolationRole {
+		// Without this the role-mode scenario would pass on an admin connection:
+		// its 403s, manager calls and rows would all hold.
+		assertRoleConnections(t, mt, []uuid.UUID{acmeID, globexID, initechID})
 	}
 
 	// Each tenant holds one row the other must never see.
@@ -309,4 +317,35 @@ func TestIntegration_RoleIsolation_CrossTenantAccessIsRefused(t *testing.T) {
 	cfg.Database.Isolation = tenant.IsolationRole
 	cfg.Database.RoleIsolation = tenant.RoleIsolationConfig{Secret: testRoleSecret}
 	runCrossTenantScenario(t, cfg, func(mt *MultiTenant) { refreshPgBouncerAuth(t, mt) }, dropTestRoles)
+}
+
+// assertRoleConnections proves that mt.Manager hands out connections logged in
+// as each tenant's own role: current_user is that role, a fully qualified read
+// of the next tenant's schema is refused with 42501, and each tenant cost one
+// cold pool open. It runs before anything else has used a tenant connection.
+func assertRoleConnections(t *testing.T, mt *MultiTenant, ids []uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	for i, id := range ids {
+		other := ids[(i+1)%len(ids)]
+		conn, err := mt.Manager.GetTenantConn(ctx, id)
+		if err != nil {
+			t.Fatalf("GetTenantConn(%s): %v", id, err)
+		}
+		var user string
+		if err := conn.QueryRowContext(ctx, "SELECT current_user").Scan(&user); err != nil {
+			conn.Close()
+			t.Fatalf("current_user for %s: %v", id, err)
+		}
+		if user != testRoleName(id) {
+			t.Errorf("tenant %s connection runs as %q, want its role %q", id, user, testRoleName(id))
+		}
+		var n int
+		err = conn.QueryRowContext(ctx, `SELECT count(*) FROM "`+testRoleName(other)+`".projects`).Scan(&n)
+		wantSQLState(t, "reading another tenant's schema as "+testRoleName(id), err, "42501")
+		conn.Close()
+	}
+	if s, ok := mt.TenantPoolStats(); !ok || s.ColdOpens != uint64(len(ids)) {
+		t.Errorf("TenantPoolStats = %+v, %v; want %d cold opens", s, ok, len(ids))
+	}
 }

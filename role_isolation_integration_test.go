@@ -69,6 +69,7 @@ func wantSQLState(t *testing.T, what string, err error, code string) {
 // criteria on a tenant role's own connection.
 func TestIntegration_RoleIsolation_Guarantees(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	ctx := context.Background()
 	mt, err := New(testConfig(getTestDatabaseURL()))
 	if err != nil {
@@ -358,6 +359,7 @@ func eventually(fn func() error) error {
 // fires the status change before the provisioned event.
 func TestIntegration_RoleIsolation_ProvisionAndConnect(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	mt := newRoleModeMT(t, testRoleSecret)
 	id := provisionForRoleTest(t, mt, "role-provision")
 	defer cleanupTestData(db, []uuid.UUID{id})
@@ -379,6 +381,7 @@ func TestIntegration_RoleIsolation_ProvisionAndConnect(t *testing.T) {
 // is granted by the next migration run.
 func TestIntegration_RoleIsolation_MigrationRunGrantsOtherOwnersTables(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	ctx := context.Background()
 	mt := newRoleModeMT(t, testRoleSecret)
 	id := provisionForRoleTest(t, mt, "role-migrations")
@@ -426,6 +429,7 @@ func TestIntegration_RoleIsolation_MigrationRunGrantsOtherOwnersTables(t *testin
 
 func TestIntegration_RoleIsolation_SuspendLocksOut(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	ctx := context.Background()
 	mt := newRoleModeMT(t, testRoleSecret)
 	id := provisionForRoleTest(t, mt, "role-suspend")
@@ -467,6 +471,7 @@ func TestIntegration_RoleIsolation_SuspendLocksOut(t *testing.T) {
 
 func TestIntegration_RoleIsolation_DeleteDropsRole(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	mt := newRoleModeMT(t, testRoleSecret)
 	id := provisionForRoleTest(t, mt, "role-delete")
 	defer cleanupTestData(db, []uuid.UUID{id})
@@ -486,6 +491,7 @@ func TestIntegration_RoleIsolation_DeleteDropsRole(t *testing.T) {
 
 func TestIntegration_RoleIsolation_Rotation(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	oldSecret := bytes.Repeat([]byte("o"), tenant.MinRoleSecretLen)
 	newSecret := bytes.Repeat([]byte("n"), tenant.MinRoleSecretLen)
 	mtOld := newRoleModeMT(t, oldSecret)
@@ -517,6 +523,7 @@ func TestIntegration_RoleIsolation_Rotation(t *testing.T) {
 
 func TestIntegration_RoleIsolation_EnsureRepairsAndSkips(t *testing.T) {
 	db := setupTestDatabase(t)
+	requirePasswordAuth(t)
 	ctx := context.Background()
 	mt := newRoleModeMT(t, testRoleSecret)
 	repaired := provisionForRoleTest(t, mt, "role-repair")
@@ -546,5 +553,63 @@ func TestIntegration_RoleIsolation_EnsureRepairsAndSkips(t *testing.T) {
 	}
 	if exists {
 		t.Error("EnsureTenantRoles created a role for an unprovisioned tenant")
+	}
+}
+
+// requirePasswordAuth skips (fails, under CI) when the server at
+// roleTestTenantDSN does not check passwords. Role isolation's login-dependent
+// guarantees mean nothing on a trust-auth server, where any password logs in.
+// It probes with a throwaway LOGIN role and a deliberately wrong password.
+// Call it after setupTestDatabase.
+func requirePasswordAuth(t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	const probe = "role_test_authprobe"
+	admin, err := pgx.Connect(ctx, getTestDatabaseURL())
+	if err != nil {
+		t.Fatalf("requirePasswordAuth: connect as admin: %v", err)
+	}
+	defer admin.Close(ctx)
+	_, _ = admin.Exec(ctx, "DROP ROLE IF EXISTS "+probe)
+	if _, err := admin.Exec(ctx, "CREATE ROLE "+probe+" LOGIN PASSWORD 'the-right-password'"); err != nil {
+		t.Fatalf("requirePasswordAuth: create probe role: %v", err)
+	}
+	defer admin.Exec(ctx, "DROP ROLE IF EXISTS "+probe)
+
+	c, err := connectAsRole(t, roleTestTenantDSN(), tenant.RoleCredentials{User: probe, Password: "a-wrong-password"})
+	if err == nil {
+		c.Close(ctx)
+		msg := "the server accepts a wrong password (trust authentication), so role isolation's login guarantees cannot be tested; use a password-authenticated server"
+		if os.Getenv("CI") != "" {
+			t.Fatal(msg)
+		}
+		t.Skip(msg)
+	}
+	if !tenant.IsAuthFailure(err) {
+		t.Fatalf("requirePasswordAuth: wrong password failed with something other than an authentication failure: %v", err)
+	}
+}
+
+func TestIntegration_RoleIsolation_OperationsAfterClose(t *testing.T) {
+	setupTestDatabase(t)
+	mt := newRoleModeMT(t, testRoleSecret)
+	if err := mt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		conn, err := mt.Manager.GetTenantConn(context.Background(), uuid.New())
+		if err == nil {
+			conn.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("GetTenantConn succeeded after Close")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetTenantConn hung after Close")
 	}
 }

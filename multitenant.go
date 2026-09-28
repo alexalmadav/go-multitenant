@@ -194,6 +194,9 @@ func New(config Config) (*MultiTenant, error) {
 		checker = limits.NewChecker(*config.Limits, repository, logger)
 		tracker, err := postgres.NewUsageTracker(db, schemaManager, config.Limits.UsageTables, logger)
 		if err != nil {
+			if ri != nil {
+				ri.pools.Close()
+			}
 			db.Close()
 			return nil, fmt.Errorf("failed to configure usage tracker: %w", err)
 		}
