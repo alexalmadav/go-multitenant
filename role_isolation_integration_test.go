@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/tenant"
@@ -245,5 +246,305 @@ func TestIntegration_RoleManager_EnsureConvergesAttributes(t *testing.T) {
 	}
 	if createDB || inherit {
 		t.Errorf("after Ensure: rolcreatedb=%v rolinherit=%v, want both false", createDB, inherit)
+	}
+}
+
+// newRoleModeMT returns a MultiTenant in role mode against the test database,
+// with tenant connections going to roleTestTenantDSN.
+func newRoleModeMT(t *testing.T, secret []byte, previous ...[]byte) *MultiTenant {
+	t.Helper()
+	cfg := testConfig(getTestDatabaseURL())
+	cfg.Database.Isolation = tenant.IsolationRole
+	cfg.Database.RoleIsolation = tenant.RoleIsolationConfig{
+		TenantDSN:         roleTestTenantDSN(),
+		Secret:            secret,
+		PreviousSecrets:   previous,
+		MaxConns:          10,
+		PerTenantMaxConns: 3,
+		MaxWarmTenants:    20,
+		IdleTimeout:       time.Minute,
+	}
+	mt, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New in role mode: %v", err)
+	}
+	t.Cleanup(func() { mt.Close() })
+	return mt
+}
+
+// refreshPgBouncerAuth regenerates PgBouncer's auth_file and reloads it, in
+// the CI job that runs PgBouncer with one. Everywhere else it does nothing.
+func refreshPgBouncerAuth(t *testing.T, mt *MultiTenant) {
+	t.Helper()
+	path, admin := os.Getenv("PGBOUNCER_AUTH_FILE"), os.Getenv("PGBOUNCER_ADMIN_DSN")
+	if path == "" {
+		return
+	}
+	var buf bytes.Buffer
+	if base := os.Getenv("PGBOUNCER_AUTH_FILE_BASE"); base != "" {
+		fixed, err := os.ReadFile(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(fixed)
+	}
+	if err := mt.PgBouncerAuthFile(context.Background(), &buf); err != nil {
+		t.Fatalf("PgBouncerAuthFile: %v", err)
+	}
+	// 0644 rather than 0600 only because PgBouncer runs as another user in the
+	// CI container. A production auth_file holds live credentials: 0600.
+	if err := os.WriteFile(path+".tmp", buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".tmp", path); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := pgx.ParseConfig(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	conn, err := pgx.ConnectConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("connect to PgBouncer's admin console: %v", err)
+	}
+	defer conn.Close(context.Background())
+	if _, err := conn.Exec(context.Background(), "RELOAD"); err != nil {
+		t.Fatalf("RELOAD: %v", err)
+	}
+}
+
+func provisionForRoleTest(t *testing.T, mt *MultiTenant, subdomain string) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	id := uuid.New()
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: id, Name: subdomain, Subdomain: subdomain}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mt.Manager.ProvisionTenant(ctx, id); err != nil {
+		t.Fatalf("ProvisionTenant in role mode: %v", err)
+	}
+	refreshPgBouncerAuth(t, mt)
+	return id
+}
+
+func currentUser(t *testing.T, mt *MultiTenant, id uuid.UUID) (string, error) {
+	t.Helper()
+	conn, err := mt.Manager.GetTenantConn(context.Background(), id)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+	var user string
+	err = conn.QueryRowContext(context.Background(), "SELECT current_user").Scan(&user)
+	return user, err
+}
+
+// eventually retries fn for up to five seconds and returns its last error.
+// It covers PgBouncer's server_login_retry backoff after a failed server
+// login; against PostgreSQL directly the first attempt succeeds.
+func eventually(fn func() error) error {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := fn()
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// First provisioning must work in role mode, even though ProvisionTenant
+// fires the status change before the provisioned event.
+func TestIntegration_RoleIsolation_ProvisionAndConnect(t *testing.T) {
+	db := setupTestDatabase(t)
+	mt := newRoleModeMT(t, testRoleSecret)
+	id := provisionForRoleTest(t, mt, "role-provision")
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+
+	user, err := currentUser(t, mt, id)
+	if err != nil {
+		t.Fatalf("tenant connection: %v", err)
+	}
+	if user != testRoleName(id) {
+		t.Errorf("current_user = %q, want the tenant's role %q", user, testRoleName(id))
+	}
+	if s, ok := mt.TenantPoolStats(); !ok || s.ColdOpens != 1 {
+		t.Errorf("TenantPoolStats = %+v, %v; want one cold open", s, ok)
+	}
+}
+
+// A table created by another role, outside the admin's default privileges,
+// is granted by the next migration run.
+func TestIntegration_RoleIsolation_MigrationRunGrantsOtherOwnersTables(t *testing.T) {
+	db := setupTestDatabase(t)
+	ctx := context.Background()
+	mt := newRoleModeMT(t, testRoleSecret)
+	id := provisionForRoleTest(t, mt, "role-migrations")
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+
+	schema := `"` + testRoleName(id) + `"`
+	admin, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []string{
+		"DROP ROLE IF EXISTS role_test_migrator",
+		"CREATE ROLE role_test_migrator NOLOGIN",
+		"GRANT USAGE, CREATE ON SCHEMA " + schema + " TO role_test_migrator",
+		"SET ROLE role_test_migrator",
+		"CREATE TABLE " + schema + ".gadgets (id int)",
+		"RESET ROLE",
+	} {
+		if _, err := admin.ExecContext(ctx, s); err != nil {
+			t.Fatalf("%s: %v", s, err)
+		}
+	}
+	admin.Close()
+	defer db.Exec("DROP TABLE IF EXISTS " + schema + ".gadgets; DROP OWNED BY role_test_migrator; DROP ROLE IF EXISTS role_test_migrator")
+
+	query := func() error {
+		conn, err := mt.Manager.GetTenantConn(ctx, id)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		var n int
+		return conn.QueryRowContext(ctx, "SELECT count(*) FROM gadgets").Scan(&n)
+	}
+	wantSQLState(t, "before a migration run", query(), "42501")
+
+	if err := mt.Migrations.ApplyMigration(ctx, id, &tenant.Migration{Version: "901", Name: "noop", SQL: "SELECT 1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := query(); err != nil {
+		t.Errorf("after a migration run: %v", err)
+	}
+}
+
+func TestIntegration_RoleIsolation_SuspendLocksOut(t *testing.T) {
+	db := setupTestDatabase(t)
+	ctx := context.Background()
+	mt := newRoleModeMT(t, testRoleSecret)
+	id := provisionForRoleTest(t, mt, "role-suspend")
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+	cred := tenant.RoleCredentials{User: testRoleName(id), Password: tenant.DerivePassword(testRoleSecret, id)}
+
+	session, err := connectAsRole(t, roleTestTenantDSN(), cred)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close(ctx)
+
+	if err := mt.Manager.SuspendTenant(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Exec(ctx, "SELECT 1"); err == nil {
+		t.Error("an open session kept working after its tenant was suspended")
+	}
+	if c, err := connectAsRole(t, roleTestTenantDSN(), cred); err == nil {
+		c.Close(ctx)
+		t.Error("a suspended tenant's role could still log in")
+	}
+
+	if err := mt.Manager.ActivateTenant(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	refreshPgBouncerAuth(t, mt)
+	if err := eventually(func() error {
+		c, err := connectAsRole(t, roleTestTenantDSN(), cred)
+		if err == nil {
+			c.Close(ctx)
+		}
+		return err
+	}); err != nil {
+		t.Fatalf("login after reactivation: %v", err)
+	}
+}
+
+func TestIntegration_RoleIsolation_DeleteDropsRole(t *testing.T) {
+	db := setupTestDatabase(t)
+	mt := newRoleModeMT(t, testRoleSecret)
+	id := provisionForRoleTest(t, mt, "role-delete")
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+
+	if err := mt.Manager.DeleteTenant(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	var exists bool
+	if err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", testRoleName(id)).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Error("the tenant's role survived DeleteTenant")
+	}
+}
+
+func TestIntegration_RoleIsolation_Rotation(t *testing.T) {
+	db := setupTestDatabase(t)
+	oldSecret := bytes.Repeat([]byte("o"), tenant.MinRoleSecretLen)
+	newSecret := bytes.Repeat([]byte("n"), tenant.MinRoleSecretLen)
+	mtOld := newRoleModeMT(t, oldSecret)
+	id := provisionForRoleTest(t, mtOld, "role-rotate")
+	defer cleanupTestData(db, []uuid.UUID{id})
+	defer dropTestRoles(db, []uuid.UUID{id})
+
+	// Step 1-2: the new key first, the old as a fallback. Behind PgBouncer the
+	// first attempt fails with 08P01, which must trigger the fallback.
+	mtBoth := newRoleModeMT(t, newSecret, oldSecret)
+	if _, err := currentUser(t, mtBoth, id); err != nil {
+		t.Fatalf("before rotation, with the old secret as fallback: %v", err)
+	}
+
+	// Step 3-4: re-key, then refresh PgBouncer's auth file.
+	if err := mtBoth.RotateTenantCredentials(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	refreshPgBouncerAuth(t, mtBoth)
+
+	// Step 5: only the new key.
+	if _, err := currentUser(t, newRoleModeMT(t, newSecret), id); err != nil {
+		t.Errorf("after rotation, with only the new secret: %v", err)
+	}
+	if _, err := currentUser(t, newRoleModeMT(t, oldSecret), id); err == nil {
+		t.Error("after rotation, the old secret alone still logged in")
+	}
+}
+
+func TestIntegration_RoleIsolation_EnsureRepairsAndSkips(t *testing.T) {
+	db := setupTestDatabase(t)
+	ctx := context.Background()
+	mt := newRoleModeMT(t, testRoleSecret)
+	repaired := provisionForRoleTest(t, mt, "role-repair")
+	unprovisioned := uuid.New()
+	if err := mt.Manager.CreateTenant(ctx, &tenant.Tenant{ID: unprovisioned, Name: "role-skip", Subdomain: "role-skip"}); err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupTestData(db, []uuid.UUID{repaired, unprovisioned})
+	defer dropTestRoles(db, []uuid.UUID{repaired, unprovisioned})
+
+	dropTestRoles(db, []uuid.UUID{repaired})
+	if _, err := currentUser(t, newRoleModeMT(t, testRoleSecret), repaired); err == nil {
+		t.Fatal("a tenant whose role was dropped could still connect")
+	}
+
+	if err := mt.EnsureTenantRoles(ctx); err != nil {
+		t.Fatalf("EnsureTenantRoles: %v", err)
+	}
+	refreshPgBouncerAuth(t, mt)
+	fresh := newRoleModeMT(t, testRoleSecret)
+	if err := eventually(func() error { _, err := currentUser(t, fresh, repaired); return err }); err != nil {
+		t.Errorf("after repair: %v", err)
+	}
+	var exists bool
+	if err := db.QueryRow("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", testRoleName(unprovisioned)).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists {
+		t.Error("EnsureTenantRoles created a role for an unprovisioned tenant")
 	}
 }

@@ -2,6 +2,7 @@ package multitenant
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -50,7 +51,7 @@ func errorCodeOf(body string) string {
 	return parsed.Error.Code
 }
 
-// TestIntegration_CrossTenantAccessIsRefused is the end-to-end check that the
+// runCrossTenantScenario is the end-to-end check that the
 // unit tests cannot make. Those test the gate with stub managers and no
 // database, and TestIntegration_TenantSchemaIsolation proves two correctly
 // scoped connections cannot see each other's rows — but only after asking for
@@ -62,11 +63,18 @@ func errorCodeOf(body string) string {
 // A refusal must mean more than a 403. The recording manager proves that no
 // connection to the other tenant's schema was acquired, and the handler proves
 // it never ran.
-func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
+func runCrossTenantScenario(t *testing.T, cfg Config, afterProvision func(*MultiTenant), cleanupRoles func(*sql.DB, []uuid.UUID)) {
 	db := setupTestDatabase(t)
 	defer db.Close()
 
-	mt, err := New(testConfig(getTestDatabaseURL()))
+	// The caller builds cfg before setupTestDatabase has chosen a database, so
+	// the DSNs are filled in here, once the database is known.
+	cfg.Database.DSN = getTestDatabaseURL()
+	if cfg.Database.Isolation == tenant.IsolationRole && cfg.Database.RoleIsolation.TenantDSN == "" {
+		cfg.Database.RoleIsolation.TenantDSN = roleTestTenantDSN()
+	}
+
+	mt, err := New(cfg)
 	if err != nil {
 		t.Fatalf("Failed to create MultiTenant: %v", err)
 	}
@@ -75,6 +83,9 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 	ctx := context.Background()
 	acmeID, globexID, initechID := uuid.New(), uuid.New(), uuid.New()
 	defer cleanupTestData(db, []uuid.UUID{acmeID, globexID, initechID})
+	if cleanupRoles != nil {
+		defer cleanupRoles(db, []uuid.UUID{acmeID, globexID, initechID})
+	}
 
 	for _, tn := range []*tenant.Tenant{
 		{ID: acmeID, Name: "Acme", Subdomain: "acme-e2e"},
@@ -87,6 +98,9 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 		if err := mt.Manager.ProvisionTenant(ctx, tn.ID); err != nil {
 			t.Fatalf("ProvisionTenant(%s) failed: %v", tn.Subdomain, err)
 		}
+	}
+	if afterProvision != nil {
+		afterProvision(mt)
 	}
 
 	// Each tenant holds one row the other must never see.
@@ -282,4 +296,17 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
+	runCrossTenantScenario(t, testConfig(""), nil, nil)
+}
+
+// The same scenario with every tenant connection logged in as the tenant's
+// own role: the refusals and the served rows must be identical.
+func TestIntegration_RoleIsolation_CrossTenantAccessIsRefused(t *testing.T) {
+	cfg := testConfig("")
+	cfg.Database.Isolation = tenant.IsolationRole
+	cfg.Database.RoleIsolation = tenant.RoleIsolationConfig{Secret: testRoleSecret}
+	runCrossTenantScenario(t, cfg, func(mt *MultiTenant) { refreshPgBouncerAuth(t, mt) }, dropTestRoles)
 }
