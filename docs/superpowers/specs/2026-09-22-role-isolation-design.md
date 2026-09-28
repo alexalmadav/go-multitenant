@@ -86,15 +86,28 @@ cannot lend a server connection logged in as one role to another. When
 server connection to serve a waiting role, or does the waiting role wait until
 `server_idle_timeout` frees one?
 
-**Method.** PgBouncer in transaction mode in front of Postgres 16, a few
-hundred roles, `max_db_connections` far below the role count. Drive traffic
-that touches every role once, then a burst against roles that have never
-connected, and measure how long those first transactions wait.
+**Method.** PgBouncer in transaction mode in front of Postgres 16, at the top
+of the target range: **5,000 roles**, one per simulated tenant, with
+`max_db_connections` far below the role count. Measure:
+
+1. **Reclamation.** Fill every server connection with idle connections held
+   by other roles, then start a transaction as a role that has none, and time
+   it.
+2. **Churn.** Concurrent workers run short transactions as roles picked at
+   random from all 5,000, and the latency distribution and error count are
+   recorded, with `server_idle_timeout` at its default and at a short value.
+3. **Per-pool overhead.** PgBouncer's memory with all 5,000 per-role pools
+   created.
+4. **`auth_file` reload.** How long PgBouncer takes to `RELOAD` a 5,000-entry
+   file, which bounds how quickly a new tenant can connect on managed
+   Postgres, and confirmation that SCRAM pass-through works with verifiers
+   supplied through `auth_file`.
 
 **Decision rule.**
 
-- If PgBouncer reclaims idle connections across roles: the design stands as
-  written.
+- If PgBouncer reclaims idle connections across roles, churn latency stays
+  within a normal request deadline, and overhead and reload time are modest
+  at 5,000: the design stands as written.
 - If it does not: the docs require a short `server_idle_timeout` (tens of
   seconds, sized from the measured reconnect cost), and the sizing arithmetic
   in the README is written around it. If even a short timeout makes new
