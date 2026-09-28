@@ -1,6 +1,7 @@
 # Role isolation — design
 
-**Status:** accepted, 2026-09-22; revised 2026-09-27 after re-review
+**Status:** accepted, 2026-09-22; revised 2026-09-27 after re-review;
+revised 2026-09-28 with spike results
 **Builds on:** v0.9.0 (membership seam, PR #9).
 
 ## Problem
@@ -114,7 +115,59 @@ of the target range: **5,000 roles**, one per simulated tenant, with
   tenants wait longer than a request deadline under the measured load, the
   design returns to review before any code is written.
 
-The spike's result, with the numbers, is appended to this document.
+### Spike results (2026-09-28)
+
+**Environment.** PostgreSQL 16.11 and PgBouncer 1.25.2 in Docker on one
+laptop (Docker Desktop), transaction mode, `max_db_connections = 20`,
+`default_pool_size = 5`, 5,000 login roles. The load generator ran inside the
+same Docker network, since Docker Desktop's host port forwarding could not
+sustain the connection churn. Absolute throughput on dedicated hardware will
+be higher; the ratios between runs are what the numbers are for.
+
+**1. Reclamation — yes.** With all 20 server connections held idle by 20
+other roles, a role with no connection ran its first transaction in 9–16 ms,
+login included, and the server-connection count stayed at 20. PgBouncer
+closes another role's idle server connection to serve a waiting role. The
+central question is answered in the design's favour.
+
+**2. Churn.** 50 concurrent workers, each running `SELECT 1` transactions as
+a tenant chosen at random, with one warm client connection kept per tenant:
+
+| Tenants sharing the load | Mode | Transactions/s | p50 | p99 | Timeouts (5 s) |
+|---|---|---|---|---|---|
+| 1 | plaintext `auth_file` | ~48,000 | 0.8 ms | 4.1 ms | 0 |
+| 20 | plaintext `auth_file` | ~830 | 60 ms | 145 ms | 0 |
+| 5,000 | plaintext `auth_file` | ~120 | 265 ms | 1.95 s | 2.2% |
+| 5,000 | `auth_query` | ~550 | 45 ms | 466 ms | 0.4% |
+
+The cost is tenant switching, not queries. A server connection logged in as
+one role cannot serve another, so once traffic spreads across more tenants
+than there are server connections, most transactions pay for a fresh
+Postgres login. At 5,000 roles Postgres was the busiest process (164% CPU in
+`auth_query` mode); with plaintext entries PgBouncer's single thread saturated
+first (99%) on SCRAM key derivation. Uniform random access across 5,000
+tenants is the worst case; real traffic concentrates on fewer tenants at a
+time, which moves results toward the upper rows.
+
+**3. Per-pool overhead — modest.** PgBouncer stayed between 25 and 53 MiB with
+5,000 per-role pools and up to ~4,800 client connections.
+
+**4. `auth_file` — works, with plaintext entries.** A real reload of a
+5,002-entry file took 2.6 ms, and a newly added tenant could log in
+immediately after. SCRAM *verifiers* in the file, however, lock a role out
+after a failed first login (see *PgBouncer authentication*).
+
+**Found along the way.** PgBouncer answers a wrong password with SQLSTATE
+`08P01`, not class `28`; PgBouncer's descriptor limit, not its connection
+limit, capped the first runs.
+
+**Decision.** The design stands, with four changes made above: `auth_file`
+carries plaintext passwords, the SCRAM salt is random again, the rotation
+retry recognises PgBouncer's `08P01`, and PgBouncer's descriptor limit is a
+documented requirement. The README states the throughput shape in the table
+above plainly: role isolation trades peak throughput under wide tenant spread
+for a database-enforced boundary, and `auth_query` is preferred wherever a
+superuser is available.
 
 ## Design
 
@@ -133,8 +186,8 @@ type RoleIsolationConfig struct {
 	// and password are replaced per tenant.
 	TenantDSN string
 
-	// Secret derives every tenant role's password and SCRAM salt. At least 32
-	// bytes, and distinct per environment. PreviousSecrets are tried, in
+	// Secret derives every tenant role's password. At least 32 bytes, and
+	// distinct per environment. PreviousSecrets are tried, in
 	// order, when a connection fails to authenticate with Secret; they exist
 	// only for rotation.
 	Secret          []byte   `json:"-"`
@@ -203,38 +256,32 @@ The role name is the schema name (`<SchemaPrefix><uuid with underscores>`, 43
 characters with the default prefix; `New` rejects a prefix that would exceed
 Postgres's 63-character identifier limit).
 
-Both the password and the SCRAM salt are derived:
+The password is derived:
 
 ```
 password = base64url( HMAC-SHA256( secret, "go-multitenant/role-password/v1:" + tenantID ) )
-salt     = HMAC-SHA256( secret, "go-multitenant/role-salt/v1:" + tenantID )[:16]
 ```
 
-The domain-separation labels keep the two derivations, and any future use of
-the secret, from ever producing the same bytes, and `v1` leaves room to change
-the scheme.
-
-**Why the salt is derived rather than random.** A deterministic salt makes the
-whole SCRAM verifier reproducible from the secret alone, which is what lets
-the library render PgBouncer's `auth_file` without reading anything from the
-database. It costs nothing: a salt exists to defeat precomputed guessing, and
-the password it salts is 256 bits of HMAC output, which cannot be guessed.
+The domain-separation label keeps this derivation from ever producing the
+same bytes as any future use of the secret, and `v1` leaves room to change the
+scheme.
 
 **The verifier.** The library computes the SCRAM-SHA-256 verifier itself —
-`crypto/pbkdf2` from the standard library, 4096 iterations, the derived salt —
-and sends `PASSWORD 'SCRAM-SHA-256$4096:…'`. No plaintext password reaches the
+`crypto/pbkdf2` from the standard library, 4096 iterations, a random 16-byte
+salt — and sends `PASSWORD 'SCRAM-SHA-256$4096:…'`. No plaintext password reaches the
 server, so with `log_statement = ddl` the server log records a verifier that
 cannot be used to log in. The password alphabet is base64url, which is ASCII,
 so the SASLprep normalisation SCRAM specifies is the identity and no Unicode
 library is needed.
 
 When a `Credentials` hook is set it replaces derivation everywhere: the role
-manager sets the password the hook returns, with a random salt; rotation
-re-sets it from the hook; `Secret`/`PreviousSecrets` are ignored; and
-`PgBouncerAuthFile` returns an error, since it cannot reproduce a verifier it
-did not derive. A hook may return an empty password, in which case the role is
-created with none and authentication is left to `pg_hba.conf` — client
-certificates, or a cloud IAM plugin.
+manager sets the password the hook returns, rotation re-sets it from the hook,
+`PgBouncerAuthFile` renders the hook's passwords, and `Secret` and
+`PreviousSecrets` are ignored. A hook may return an empty password, in which
+case the role is created with none and authentication is left to
+`pg_hba.conf` — client certificates, or a cloud IAM plugin. Such a tenant
+cannot go through an `auth_file`, so `PgBouncerAuthFile` reports an error
+naming it.
 
 ### Role manager
 
@@ -312,11 +359,15 @@ tool.
 downtime. With `auth_file` it has a short window, stated below.
 
 1. Deploy with `Secret` set to the new key and `PreviousSecrets` holding the old.
-2. When a tenant pool's first connection fails with any SQLSTATE in class `28`
-   (invalid authorization — `28000`, `28P01`), the pool is reopened with each
-   previous key in turn, and keeps whichever authenticates. Any other error is
-   returned as is. PgBouncer's exact code for a failed login is confirmed in
-   the CI run through PgBouncer.
+2. When a tenant pool's first connection fails authentication, the pool is
+   reopened with each previous key in turn, and keeps whichever
+   authenticates. Any other error is returned as is. "Fails authentication"
+   means either a SQLSTATE in class `28` (invalid authorization — `28000`,
+   `28P01`), which is what Postgres sends, or `08P01` with a message
+   containing `authentication failed`, which is what PgBouncer sends: the
+   spike measured PgBouncer 1.25.2 answering a wrong password with
+   `08P01 SASL authentication failed`. `08P01` alone is a generic protocol
+   violation and is not retried.
 3. `(*MultiTenant).RotateTenantCredentials(ctx)` re-keys every role to `Secret`.
 4. With `auth_file` (see *PgBouncer authentication*), regenerate the file and
    reload PgBouncer after step 3.
@@ -324,10 +375,10 @@ downtime. With `auth_file` it has a short window, stated below.
 
 Already-open connections stay authenticated throughout.
 
-**The `auth_file` window.** Postgres stores one verifier per role. Between
+**The `auth_file` window.** Postgres stores one password per role. Between
 step 3 re-keying a role and step 4 reloading PgBouncer, PgBouncer's file still
-holds the old verifier while Postgres holds the new one, so PgBouncer's SCRAM
-pass-through to Postgres fails. A tenant that already has a PgBouncer server
+holds the old password while Postgres holds the new one, so PgBouncer's own
+login to Postgres fails. A tenant that already has a PgBouncer server
 connection keeps working through the window; a tenant that needs a new server
 connection cannot get one until the reload. The window is as long as the gap
 between the two steps, so the README's sidecar reloads immediately after
@@ -416,37 +467,72 @@ boundary.
 ### PgBouncer authentication
 
 Each tenant logs in as its own role, so PgBouncer must authenticate thousands
-of roles and, for each, log in to Postgres on the client's behalf. With SCRAM,
-PgBouncer does the second part by *pass-through*: it reuses the keys from the
-client's SCRAM exchange, which works when the verifier PgBouncer holds matches
-the one stored in Postgres. PgBouncer can learn the verifiers two ways, and
-both are supported, because which one a deployment can use depends on where
-Postgres runs.
+of roles and, for each, log in to Postgres on the client's behalf. It can
+learn tenant credentials two ways, and both are supported, because which one a
+deployment can use depends on where Postgres runs. The spike measured both.
 
-**`auth_query` — self-hosted, with a superuser.** PgBouncer runs a query to
-fetch the verifier when a role logs in. The query calls a `SECURITY DEFINER`
-function that reads `pg_authid`, and creating that function takes a
-superuser. New tenants work immediately, with no PgBouncer change. The README
-gives the function and the `auth_user`/`auth_query` settings.
+**`auth_query` — self-hosted, with a superuser. Preferred.** PgBouncer runs a
+query that returns the role's SCRAM verifier when the role logs in, and logs
+in to Postgres by SCRAM *pass-through*, reusing the keys from the client's
+exchange. The query calls a `SECURITY DEFINER` function that reads
+`pg_shadow`, and creating that function takes a superuser. New tenants work
+immediately, with no PgBouncer change. PgBouncer logs in to Postgres as the
+`auth_user` to run the query, and it cannot do that from a verifier, so the
+`auth_user`'s own entry in PgBouncer's `auth_file` must be a plaintext
+password. The README gives the function and the
+`auth_user`/`auth_query`/`auth_file` settings.
 
-**`auth_file` — managed Postgres (RDS, Cloud SQL and others).** These services
-grant no superuser, so nothing can read `pg_authid`. Instead, PgBouncer reads
-the verifiers from a file. Because every verifier is derived from the secret,
-`(*MultiTenant).PgBouncerAuthFile(ctx, w)` renders the complete file — one
-`"<role>" "SCRAM-SHA-256$…"` line per provisioned tenant, excluding suspended
-and cancelled ones — without reading anything secret from the database.
+**`auth_file` with plaintext passwords — managed Postgres (RDS, Cloud SQL and
+others).** These services grant no superuser, so nothing can read password
+verifiers. Instead, PgBouncer reads credentials from a file.
+`(*MultiTenant).PgBouncerAuthFile(ctx, w)` renders it — one
+`"<role>" "<password>"` line per active provisioned tenant, excluding
+suspended and cancelled ones — from the derived passwords, without reading
+anything secret from the database. PgBouncer then authenticates clients and
+logs in to Postgres itself.
 
-The cost of `auth_file`: **a new tenant cannot connect through PgBouncer until
-the file is regenerated and PgBouncer reloaded.** The library cannot write to
-PgBouncer's filesystem, so the deployment runs the regeneration — the README
-gives a small sidecar loop that renders the file on an interval or after a
-provisioning event and issues `RELOAD` on PgBouncer's admin console. Until the
-reload, the new tenant's requests fail with the authentication error above,
-which names the stale auth file as a likely cause.
+The file holds **plaintext passwords, not SCRAM verifiers**, and that is
+deliberate. The spike found that PgBouncer 1.25.2, given verifiers in an
+`auth_file`, locks a role out if that role's first login attempt since
+PgBouncer started is a failure: every later login with the correct password
+fails with `client authentication did not provide SCRAM keys` until
+PgBouncer restarts, and `RELOAD` does not clear it. After every restart all
+roles are "first login" again, so one bad attempt per role — from a
+misconfigured client, the rotation retry, or anyone who can reach PgBouncer —
+would lock tenants out. Plaintext entries showed no lockout, nor did
+`auth_query`. A test in CI guards this, in both modes.
 
-PgBouncer cannot reuse a server connection across roles, so
-`max_db_connections` and `server_idle_timeout` need sizing for many small
-pools; the README gives the arithmetic, informed by the spike above.
+What plaintext costs:
+
+- **The rendered file is a secret.** It contains every tenant's working
+  credentials. Write it with mode `0600` to a volume only PgBouncer and the
+  renderer can read, as you would the role secret itself.
+- **PgBouncer CPU.** With plaintext entries PgBouncer performs the expensive
+  SCRAM key derivation for each client login and each server login, on its
+  single thread. The spike measured about 4.5× lower throughput than
+  `auth_query` under the worst-case load (see *Spike results*).
+- **New tenants wait for a reload.** A new tenant cannot connect through
+  PgBouncer until the file is regenerated and PgBouncer reloaded. The library
+  cannot write to PgBouncer's filesystem, so the deployment runs the
+  regeneration — the README gives a small sidecar loop that renders the file
+  on an interval or after a provisioning event and issues `RELOAD` on
+  PgBouncer's admin console. The reload itself is cheap: 2.6 ms for 5,002
+  entries in the spike. PgBouncer re-reads the file only when it has changed.
+  Until the reload, the new tenant's requests fail with the authentication
+  error above, which names a stale auth file as a likely cause.
+
+**Operational requirements, either mode.**
+
+- **File descriptors.** Every warm tenant pool in every application instance
+  holds a client connection open to PgBouncer. PgBouncer's descriptor limit
+  must cover roughly `MaxWarmTenants × application instances` plus its server
+  connections. Container defaults are often a soft limit of 1,024; in the
+  spike, exceeding it produced `accept() failed: No file descriptors
+  available` in PgBouncer's log and only connection timeouts at the client,
+  not errors. The README gives the arithmetic and the `ulimit` setting.
+- **Sizing.** PgBouncer cannot reuse a server connection across roles, so
+  `max_db_connections` and `server_idle_timeout` need sizing for many small
+  pools; the README gives the arithmetic, informed by the spike.
 
 ## Rejected alternatives
 
@@ -458,8 +544,10 @@ pools; the README gives the arithmetic, informed by the spike above.
   request pays a connection and a SCRAM handshake even behind PgBouncer.
 - **Random passwords stored on the tenant record** — a credential at rest in
   `public.tenants` that would need encrypting, which brings back a master key.
-- **Random SCRAM salts** — would make `auth_file` impossible to render without
-  reading verifiers back from `pg_authid`, which managed services forbid.
+- **SCRAM verifiers in `auth_file`** — would keep plaintext passwords off
+  PgBouncer's host, but PgBouncer 1.25.2 then locks a role out after a failed
+  first login, until restart. Measured in the spike; see *PgBouncer
+  authentication*. Revisit if a later PgBouncer release fixes it.
 - **A startup check against `max_connections`** — behind PgBouncer that value
   bounds PgBouncer's server side, not the library's connections, so the check
   would mislead.
@@ -483,9 +571,15 @@ total or `PerTenantMaxConns` for any tenant. **Fairness:** saturate one tenant
 far past its cap and assert another tenant still acquires within a short
 deadline — the test that fails if the slot order is reversed.
 
-**Unit — credentials:** password and salt derivation are stable per tenant
-and differ across tenants, secrets and purposes; the verifier matches a known
-answer for fixed inputs; a `Credentials` hook makes `PgBouncerAuthFile` fail.
+**Unit — credentials:** password derivation is stable per tenant and differs
+across tenants and secrets; the verifier for a fixed password and salt
+matches a known answer; `PgBouncerAuthFile` renders plaintext entries for
+active tenants only, and reports an error naming any tenant whose
+`Credentials` hook returned no password.
+
+**Unit — retry classification:** `28000`, `28P01`, and `08P01` with
+`authentication failed` in the message are retried with a previous secret;
+`08P01` with any other message, and every other code, is not.
 
 **Unit — hook ordering:** a manager that fires `OnTenantStatusChanged` before
 `OnTenantProvisioned`, as `ProvisionTenant` does, provisions cleanly.
@@ -504,7 +598,7 @@ answer for fixed inputs; a `Credentials` hook makes `PgBouncerAuthFile` fail.
 - rotation: connections keep working across every step;
 - `EnsureTenantRoles` repairs a tenant whose role was dropped and skips an
   unprovisioned tenant;
-- the derived verifier authenticates directly against Postgres;
+- the verifier the library computes authenticates directly against Postgres;
 - the cross-tenant end-to-end test runs again in role mode.
 
 Roles are cluster-wide, not per-database, so the test cleanup drops tenant
@@ -512,6 +606,13 @@ roles explicitly.
 
 **CI:** the PgBouncer job runs the role-mode suite twice, once with
 `auth_query` (creating the lookup function as the container's superuser) and
-once with a rendered `auth_file`, both in transaction mode. The `auth_file`
-run provisions a tenant, regenerates the file, reloads PgBouncer, and asserts
-the tenant can then connect.
+once with a rendered plaintext `auth_file`, both in transaction mode, with
+PgBouncer's descriptor limit raised. Both runs include:
+
+- **the lockout guard:** restart PgBouncer, make a tenant's first login a
+  wrong password, then assert its correct login succeeds. This is the test
+  that fails if the `auth_file` is ever switched to SCRAM verifiers;
+- the rotation retry against PgBouncer's real `08P01` response.
+
+The `auth_file` run also provisions a tenant, regenerates the file, reloads
+PgBouncer, and asserts the tenant can then connect.
