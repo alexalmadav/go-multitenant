@@ -53,8 +53,10 @@ func (r *roleIsolatedManager) WithTenantTx(ctx context.Context, tenantID uuid.UU
 	if err != nil {
 		return err
 	}
+	// Runs on panic too, so the deferred conn.Close does not wait on an open
+	// transaction. After a successful Commit it is a no-op (sql.ErrTxDone).
+	defer func() { _ = tx.Rollback() }()
 	if err := fn(tx); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	if err := tx.Commit(); err != nil {

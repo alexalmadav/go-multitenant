@@ -155,3 +155,32 @@ func TestRoleIsolatedReportsLeakedConnections(t *testing.T) {
 	}
 	t.Fatal("no leak warning naming the tenant after the unclosed connection was collected")
 }
+
+// A panic in the callback must not leave the transaction open: sql.Conn.Close
+// waits for it, which would hang the unwind and hold both pool slots forever.
+func TestRoleIsolatedWithTenantTxReleasesOnPanic(t *testing.T) {
+	m, _, d, pools := roleManagerForTest(t, bigLimits, zap.NewNop())
+
+	recovered := make(chan any, 1)
+	go func() {
+		defer func() { recovered <- recover() }()
+		_ = m.WithTenantTx(context.Background(), uuid.New(), func(*sql.Tx) error {
+			panic("boom")
+		})
+	}()
+
+	select {
+	case v := <-recovered:
+		if v != "boom" {
+			t.Errorf("recovered %v, want the callback's panic", v)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("WithTenantTx did not return after the callback panicked")
+	}
+	if stmts := d.statements(); stmts[len(stmts)-1] != "ROLLBACK" {
+		t.Errorf("last statement = %q after a panic, want ROLLBACK", stmts[len(stmts)-1])
+	}
+	if got := pools.Stats().InUse; got != 0 {
+		t.Errorf("InUse = %d after a panic, want 0", got)
+	}
+}
