@@ -281,6 +281,7 @@ func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
 
 	// Test the connection
 	if err := db.Ping(); err != nil {
+		db.Close()
 		return nil, err
 	}
 
