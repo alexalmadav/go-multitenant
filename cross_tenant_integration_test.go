@@ -55,9 +55,9 @@ func errorCodeOf(body string) string {
 // database, and TestIntegration_TenantSchemaIsolation proves two correctly
 // scoped connections cannot see each other's rows — but only after asking for
 // the right tenant's connection directly. This test joins the two: a real
-// database, two provisioned tenants with their own data, the real resolver and
-// manager behind the full middleware chain, and requests authenticated for one
-// tenant aimed at the other.
+// database, provisioned tenants each holding their own data - one of them
+// suspended - the real resolver and manager behind the full middleware chain,
+// and requests authenticated for one tenant aimed at another.
 //
 // A refusal must mean more than a 403. The recording manager proves that no
 // connection to the other tenant's schema was acquired, and the handler proves
@@ -73,12 +73,13 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 	defer mt.Close()
 
 	ctx := context.Background()
-	acmeID, globexID := uuid.New(), uuid.New()
-	defer cleanupTestData(db, []uuid.UUID{acmeID, globexID})
+	acmeID, globexID, initechID := uuid.New(), uuid.New(), uuid.New()
+	defer cleanupTestData(db, []uuid.UUID{acmeID, globexID, initechID})
 
 	for _, tn := range []*tenant.Tenant{
 		{ID: acmeID, Name: "Acme", Subdomain: "acme-e2e"},
 		{ID: globexID, Name: "Globex", Subdomain: "globex-e2e"},
+		{ID: initechID, Name: "Initech", Subdomain: "initech-e2e"},
 	} {
 		if err := mt.Manager.CreateTenant(ctx, tn); err != nil {
 			t.Fatalf("CreateTenant(%s) failed: %v", tn.Subdomain, err)
@@ -89,7 +90,9 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 	}
 
 	// Each tenant holds one row the other must never see.
-	for id, secret := range map[uuid.UUID]string{acmeID: "acme-confidential", globexID: "globex-confidential"} {
+	for id, secret := range map[uuid.UUID]string{
+		acmeID: "acme-confidential", globexID: "globex-confidential", initechID: "initech-confidential",
+	} {
 		conn, err := mt.Manager.GetTenantConn(ctx, id)
 		if err != nil {
 			t.Fatalf("GetTenantConn failed: %v", err)
@@ -101,8 +104,16 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 		conn.Close()
 	}
 
-	// The application's membership: alice belongs to Acme, bob to Globex.
-	members := map[string]uuid.UUID{"alice": acmeID, "bob": globexID}
+	// Initech is suspended after its data is seeded. Carol is a genuine member
+	// of it, so the membership check would admit her: only the status check
+	// stands between her and a suspended tenant's schema.
+	if err := mt.Manager.SuspendTenant(ctx, initechID); err != nil {
+		t.Fatalf("SuspendTenant failed: %v", err)
+	}
+
+	// The application's membership: alice belongs to Acme, bob to Globex,
+	// carol to the suspended Initech.
+	members := map[string]uuid.UUID{"alice": acmeID, "bob": globexID, "carol": initechID}
 	membership := tenant.MembershipFunc(func(_ context.Context, subject string, tenantID uuid.UUID) error {
 		if members[subject] != tenantID {
 			return tenant.ErrNotMember
@@ -163,7 +174,10 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 	// A chain that rewrites the path after the tenant is resolved. With
 	// "/health" in SkipPaths, a request to /api/health resolves the tenant on
 	// the way in and then looks like a skipped path to everything after
-	// StripPrefix. Every gate after the rewrite must still run.
+	// StripPrefix. Every gate after the rewrite must still run: the two
+	// rewritten cases below are refused by RequireMembership and by
+	// ValidateTenant respectively, and each would be served if that gate
+	// consulted the skip list before the resolved tenant.
 	rewritten := httpmw.Chain(
 		http.StripPrefix("/api", httpmw.Chain(list,
 			mw.ValidateTenant(), mw.RequireMembership(), mw.EnforceLimits(), mw.SetTenantDB())),
@@ -210,6 +224,16 @@ func TestIntegration_CrossTenantAccessIsRefused(t *testing.T) {
 			name: "path rewritten to a skipped prefix is still enforced", handler: rewritten,
 			host: "globex-e2e.app.test", path: "/api/health", subject: "alice",
 			wantStatus: http.StatusForbidden, wantCode: "ACCESS_DENIED",
+		},
+		{
+			name: "suspended tenant is refused on the standard chain", handler: standard,
+			host: "initech-e2e.app.test", path: "/projects", subject: "carol",
+			wantStatus: http.StatusForbidden, wantCode: "TENANT_SUSPENDED",
+		},
+		{
+			name: "suspended tenant is refused on a path rewritten to a skipped prefix", handler: rewritten,
+			host: "initech-e2e.app.test", path: "/api/health", subject: "carol",
+			wantStatus: http.StatusForbidden, wantCode: "TENANT_SUSPENDED",
 		},
 	}
 

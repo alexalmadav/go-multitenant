@@ -36,7 +36,10 @@ func TestNew_InvalidConfig(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := New(tt.config)
 			if err == nil {
-				t.Error("New() should return error for invalid config")
+				t.Fatal("New() should return error for invalid config")
+			}
+			if !strings.Contains(err.Error(), "failed to setup database") {
+				t.Errorf("New() should fail on the DSN, got: %v", err)
 			}
 		})
 	}

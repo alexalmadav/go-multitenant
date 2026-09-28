@@ -93,7 +93,8 @@ ginMw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), gi
     SkipPaths: []string{"/health"},
 })
 api := r.Group("/api")
-// Add ginMw.RequireMembership() once you have auth; see Access Control below.
+// Once you have auth, pass your Membership in ginmiddleware.Config and add
+// ginMw.RequireMembership() after ResolveTenant; see Access Control below.
 api.Use(ginMw.ResolveTenant(), ginMw.ValidateTenant(), ginMw.EnforceLimits(), ginMw.SetTenantDB())
 ```
 
@@ -312,9 +313,12 @@ api.Use(ginMw.SetTenantDB())               // Set database context
 api.Use(ginMw.LogAccess())                 // Log access
 ```
 
-The adapter has no `Standard()` and bundles nothing: setting
-`Config.Membership` alone enforces nothing, so `RequireMembership()` has to be
-in the chain above or the check never runs.
+The adapter has no `Standard()` and bundles nothing, and it does not read
+`multitenant.Config.Membership`. Pass the same `Membership` to the adapter
+(`ginmiddleware.Config{Membership: membership}`) and keep
+`RequireMembership()` in the chain above; without either, the check never
+runs. Setting `multitenant.Config.Membership` alone satisfies `New` and
+changes nothing in a Gin chain.
 
 Setting `c.Set("user_id", id)` from a Gin auth middleware still feeds the
 access log — the adapter bridges it onto the request context automatically.
@@ -559,9 +563,13 @@ closed**: applied with no `Membership` configured, it denies every request
 rather than passing them through, because a missed limit check costs money
 while a missed membership check serves one tenant's data to another.
 `httpmw.Standard()` includes the check only when a `Membership` is configured.
-If you assemble `httpmw.New` or the Gin adapter yourself rather than going
-through `multitenant.New`, the startup requirement does not apply, so add
-`RequireMembership()` to your chain deliberately.
+
+The startup requirement belongs to `multitenant.New` alone. `httpmw.New` and
+the Gin adapter do not carry it, and Gin applications always build the adapter
+themselves: the adapter never reads `multitenant.Config.Membership`, so
+setting it satisfies `New` without protecting a Gin chain. Pass the same
+`Membership` to `ginmiddleware.Config` and add `RequireMembership()` to the
+chain; see the Gin section above.
 
 Role and permission checks stay yours — the library has no role model.
 
@@ -766,7 +774,7 @@ treated as permission to act inside it. See Access Control for the design.
 
 - **`multitenant.New` requires a membership decision.** It returns an error
   unless `Config.Membership` or `Config.InsecureSkipMembership` is set. To
-  keep v0.8 behaviour exactly, set the opt-out:
+  keep v0.8's unchecked chain, set the opt-out:
   ```go
   config.InsecureSkipMembership = true
   ```
@@ -774,8 +782,21 @@ treated as permission to act inside it. See Access Control for the design.
   if your token carries the tenant, or a `tenant.MembershipFunc` over your own
   membership table. Your auth middleware must then put the caller in the
   request context with `tenant.WithPrincipal` (or `tenant.WithUserID`, which
-  now does the same). `httpmw.New` and the Gin adapter are unchanged; the
-  requirement applies only to `multitenant.New`.
+  now does the same). `httpmw.New` is unchanged; the requirement applies only
+  to `multitenant.New`.
+- **Gin: setting `Config.Membership` is not enough.** The Gin adapter is built
+  separately and does not read `multitenant.Config.Membership`, so setting it
+  satisfies `New` and changes nothing in a Gin chain. Pass the same value to
+  the adapter, and add the check to the chain after your auth middleware and
+  `ResolveTenant`:
+  ```go
+  config.Membership = membership // satisfies multitenant.New
+  ginMw := ginmiddleware.NewMiddleware(mt.Manager, mt.Resolver, mt.GetLogger(), ginmiddleware.Config{
+      Membership: membership, // enforced by RequireMembership below
+  })
+  api.Use(authMiddleware(), ginMw.ResolveTenant(), ginMw.ValidateTenant(),
+      ginMw.RequireMembership(), ginMw.EnforceLimits(), ginMw.SetTenantDB())
+  ```
 - **A resolved tenant is always checked, whatever the skip lists say.**
   `ValidateTenant`, `EnforceLimits` and `RequireMembership` consult `SkipPaths`
   and `SkipHosts` only while no tenant has been resolved. This changes nothing

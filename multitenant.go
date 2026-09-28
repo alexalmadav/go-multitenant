@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 
 	"github.com/alexalmadav/go-multitenant/database"
 	"github.com/alexalmadav/go-multitenant/database/postgres"
@@ -28,21 +29,30 @@ type Config struct {
 	// and HTTPMiddleware.Standard enforces it. New requires either this or
 	// InsecureSkipMembership: whether callers are checked against the tenant
 	// they reach is a decision New will not make by default.
+	//
+	// The Gin adapter does not read this field. A Gin application must also
+	// pass the same Membership to ginmiddleware.Config and add
+	// RequireMembership() to its chain; setting it here alone satisfies New
+	// and enforces nothing in a Gin chain.
 	Membership tenant.Membership
-	// InsecureSkipMembership runs the middleware with no membership check.
-	// Standard then resolves, validates and scopes each request without asking
-	// whether the caller belongs to the tenant, so any caller that reaches a
-	// tenant's origin reaches its data. New refuses a Config that sets neither
-	// this nor Membership, so running without the check is always a written
+	// InsecureSkipMembership makes HTTPMiddleware.Standard omit the membership
+	// check. Standard then resolves, validates and scopes each request without
+	// asking whether the caller belongs to the tenant, so any caller that
+	// reaches a tenant's origin reaches its data. HTTPMiddleware.RequireMembership
+	// applied by hand still denies every request, as it does whenever no
+	// Membership is configured. New refuses a Config that sets neither this
+	// nor Membership, so running without the check is always a written
 	// decision rather than a forgotten option. Set it only while no route
 	// serves tenant data to authenticated callers, or when membership is
 	// enforced somewhere this library cannot see.
 	InsecureSkipMembership bool
-	// SkipPaths are path prefixes whose requests bypass tenant handling. A
-	// nil slice keeps the default, []string{"/health", "/metrics",
-	// "/api/public/"}; a non-nil empty slice skips nothing. These prefixes
-	// bypass the membership check as well as tenant resolution, so a prefix
-	// listed here is an authorization decision, not only a routing one.
+	// SkipPaths are path prefixes whose requests bypass tenant resolution, and
+	// so every check that depends on it, including membership. A nil slice
+	// keeps the default, []string{"/health", "/metrics", "/api/public/"}; a
+	// non-nil empty slice skips nothing. A tenant that has already been
+	// resolved is always checked whatever these prefixes say; see
+	// httpmw.Config.SkipPaths. A prefix listed here is an authorization
+	// decision, not only a routing one.
 	SkipPaths []string
 	// SkipHosts are hosts whose requests bypass tenant handling, matched
 	// against the request host without its port and ignoring case. Use it for
@@ -53,6 +63,17 @@ type Config struct {
 	// caveat.
 	SkipHosts []string
 }
+
+// ErrNoMembershipDecision is returned by New when the Config sets neither a
+// Membership nor InsecureSkipMembership, or sets a Membership that is a nil
+// pointer or function, which would panic on its first Allow call.
+var ErrNoMembershipDecision = errors.New("multitenant: no membership decision: set Config.Membership, " +
+	"or set InsecureSkipMembership to run with no membership check, " +
+	"which lets any caller that reaches a tenant's origin reach its data")
+
+// ErrConflictingMembershipDecision is returned by New when the Config sets both
+// a Membership and InsecureSkipMembership.
+var ErrConflictingMembershipDecision = errors.New("multitenant: Config.Membership and InsecureSkipMembership are both set; choose one")
 
 // DefaultConfig returns the core defaults and no limits.
 func DefaultConfig() Config {
@@ -86,12 +107,12 @@ func New(config Config) (*MultiTenant, error) {
 	// touches the database, so it is the first error a misconfigured
 	// deployment sees.
 	switch {
+	case isTypedNil(config.Membership):
+		return nil, fmt.Errorf("%w (Config.Membership holds a nil %T)", ErrNoMembershipDecision, config.Membership)
 	case config.Membership == nil && !config.InsecureSkipMembership:
-		return nil, errors.New("multitenant: Config.Membership is nil; set a Membership, " +
-			"or set InsecureSkipMembership to run with no membership check, " +
-			"which lets any caller that reaches a tenant's origin reach its data")
+		return nil, ErrNoMembershipDecision
 	case config.Membership != nil && config.InsecureSkipMembership:
-		return nil, errors.New("multitenant: Config.Membership and InsecureSkipMembership are both set; choose one")
+		return nil, ErrConflictingMembershipDecision
 	case config.InsecureSkipMembership:
 		logger.Warn("InsecureSkipMembership is set: requests are scoped to a tenant " +
 			"without checking that the caller belongs to it")
@@ -264,6 +285,22 @@ func setupDatabase(config tenant.DatabaseConfig) (*sql.DB, error) {
 	}
 
 	return db, nil
+}
+
+// isTypedNil reports whether m is a non-nil interface holding a nil pointer,
+// function, map, slice, channel or interface. Such a Membership compares
+// unequal to nil yet panics on its first Allow call, so New treats it as no
+// decision at all.
+func isTypedNil(m tenant.Membership) bool {
+	if m == nil {
+		return false
+	}
+	v := reflect.ValueOf(m)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Func, reflect.Map, reflect.Slice, reflect.Chan, reflect.Interface:
+		return v.IsNil()
+	}
+	return false
 }
 
 // Helper functions for creating components
