@@ -101,7 +101,17 @@ func (rm *RoleManager) Ensure(ctx context.Context, t *tenant.Tenant) error {
 	}
 	defer tx.Rollback()
 
+	// Serialize concurrent Ensure calls for the same role: without this, two
+	// callers can both see the role as missing and one CREATE ROLE fails.
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, cred.User); err != nil {
+		return fmt.Errorf("database: ensure role %s: %w", cred.User, err)
+	}
+
 	exists, err := roleExists(ctx, tx, cred.User)
+	if err != nil {
+		return err
+	}
+	attrs, err := lockedDownAttributes(ctx, tx)
 	if err != nil {
 		return err
 	}
@@ -110,6 +120,8 @@ func (rm *RoleManager) Ensure(ctx context.Context, t *tenant.Tenant) error {
 		stmts = append(stmts, "CREATE ROLE "+role+" NOINHERIT NOCREATEDB NOCREATEROLE")
 	}
 	stmts = append(stmts,
+		// Converge attributes of a role that already exists, too.
+		"ALTER ROLE "+role+" "+attrs,
 		"ALTER ROLE "+role+" PASSWORD "+password,
 		"ALTER ROLE "+role+" "+login,
 		"GRANT USAGE ON SCHEMA "+schema+" TO "+role,
@@ -158,7 +170,7 @@ func (rm *RoleManager) LockOut(ctx context.Context, tenantID uuid.UUID) error {
 	}
 	var ended int
 	if err := rm.db.QueryRowContext(ctx,
-		`SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = $1`, name).Scan(&ended); err != nil {
+		`SELECT count(*) FILTER (WHERE pg_terminate_backend(pid)) FROM pg_stat_activity WHERE usename = $1`, name).Scan(&ended); err != nil {
 		return fmt.Errorf("database: end sessions of %s: %w", name, err)
 	}
 	rm.logger.Info("Locked out tenant role", zap.String("role", name), zap.Int("sessions_ended", ended))
@@ -183,6 +195,34 @@ func (rm *RoleManager) Drop(ctx context.Context, tenantID uuid.UUID) error {
 		}
 	}
 	return nil
+}
+
+// lockedDownAttributes returns the ALTER ROLE attribute clauses that strip a
+// tenant role of privileges. PostgreSQL 16 lets a non-superuser CREATEROLE
+// admin change SUPERUSER, CREATEDB, REPLICATION and BYPASSRLS only if it holds
+// that attribute itself (even for a no-op), so each clause is included only
+// when the admin may issue it. NOINHERIT and NOCREATEROLE are always allowed.
+func lockedDownAttributes(ctx context.Context, q queryRower) (string, error) {
+	var super, createDB, replication, bypassRLS bool
+	if err := q.QueryRowContext(ctx,
+		`SELECT rolsuper, rolcreatedb, rolreplication, rolbypassrls FROM pg_roles WHERE rolname = current_user`,
+	).Scan(&super, &createDB, &replication, &bypassRLS); err != nil {
+		return "", fmt.Errorf("database: read admin role attributes: %w", err)
+	}
+	attrs := []string{"NOINHERIT", "NOCREATEROLE"}
+	if super {
+		attrs = append(attrs, "NOSUPERUSER")
+	}
+	if super || createDB {
+		attrs = append(attrs, "NOCREATEDB")
+	}
+	if super || replication {
+		attrs = append(attrs, "NOREPLICATION")
+	}
+	if super || bypassRLS {
+		attrs = append(attrs, "NOBYPASSRLS")
+	}
+	return strings.Join(attrs, " "), nil
 }
 
 func backfillGrants(schema, role string) []string {
