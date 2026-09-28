@@ -17,6 +17,10 @@ import (
 // tenant together, was at its connection limit.
 var ErrPoolExhausted = errors.New("tenant: connection pool exhausted")
 
+// poolOpenTimeout bounds one opener call, which runs detached from the
+// requests waiting on it.
+const poolOpenTimeout = 30 * time.Second
+
 var errPoolsClosed = errors.New("tenant: connection pools are closed")
 
 // PoolsConfig bounds Pools. Every field must be positive; see
@@ -146,12 +150,12 @@ func (p *Pools) Acquire(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, fun
 		p.dropTenantSlots(tenantID)
 	}
 
-	e, err := p.entry(ctx, tenantID)
+	e, db, err := p.entry(ctx, tenantID)
 	if err != nil {
 		releaseSlots()
 		return nil, nil, err
 	}
-	conn, err := e.db.Conn(ctx)
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		p.finish(e)
 		releaseSlots()
@@ -168,46 +172,72 @@ func (p *Pools) Acquire(ctx context.Context, tenantID uuid.UUID) (*sql.Conn, fun
 	return conn, release, nil
 }
 
-// entry returns the tenant's open pool, opening it if needed, with its
-// in-use count already raised so it cannot be evicted before it is used.
-func (p *Pools) entry(ctx context.Context, id uuid.UUID) (*poolEntry, error) {
+// entry returns the tenant's open pool and its database, opening the pool if
+// needed. The entry's in-use count is already raised, so it cannot be evicted
+// or closed before the caller finishes with it. The database is read under
+// the lock; callers must use it rather than reading e.db.
+func (p *Pools) entry(ctx context.Context, id uuid.UUID) (*poolEntry, *sql.DB, error) {
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		return nil, errPoolsClosed
+		return nil, nil, errPoolsClosed
 	}
-	if e, ok := p.entries[id]; ok {
-		e.inUse++
-		e.lastUsed = p.now()
+	var evicted []*sql.DB
+	e, ok := p.entries[id]
+	if ok {
 		select {
 		case <-e.ready:
 			p.stats.Hits++
 		default:
 		}
-		p.mu.Unlock()
-
-		select {
-		case <-e.ready:
-		case <-ctx.Done():
-			p.finish(e)
-			return nil, fmt.Errorf("tenant: waiting for %s's pool to open: %w", id, ctx.Err())
-		}
-		if e.err != nil {
-			p.finish(e)
-			return nil, e.err
-		}
-		return e, nil
+	} else {
+		e = &poolEntry{ready: make(chan struct{})}
+		p.entries[id] = e
+		p.stats.ColdOpens++
+		evicted = p.evictLocked(id)
+		go p.openEntry(id, e)
 	}
-
-	e := &poolEntry{ready: make(chan struct{}), inUse: 1, lastUsed: p.now()}
-	p.entries[id] = e
-	p.stats.ColdOpens++
-	evicted := p.evictLocked(id)
+	e.inUse++
+	e.lastUsed = p.now()
 	p.mu.Unlock()
 	closeAll(evicted)
 
-	db, err := p.open(ctx, id)
+	select {
+	case <-e.ready:
+	case <-ctx.Done():
+		p.finish(e)
+		return nil, nil, fmt.Errorf("tenant: waiting for %s's pool to open: %w", id, ctx.Err())
+	}
 
+	p.mu.Lock()
+	db, err := e.db, e.err
+	p.mu.Unlock()
+	if err != nil {
+		p.finish(e)
+		return nil, nil, err
+	}
+	return e, db, nil
+}
+
+// openEntry opens an entry's database. It runs detached from every request,
+// so one requester giving up cannot fail the others waiting on the same open.
+// It holds no in-use count and is not waited for by Close.
+func (p *Pools) openEntry(id uuid.UUID, e *poolEntry) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), poolOpenTimeout)
+	defer cancel()
+
+	var db *sql.DB
+	var err error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				db, err = nil, fmt.Errorf("tenant: opening pool for %s panicked: %v", id, r)
+			}
+		}()
+		db, err = p.open(ctx, id)
+	}()
+
+	var toClose *sql.DB
 	p.mu.Lock()
 	e.db, e.err = db, err
 	close(e.ready)
@@ -215,13 +245,13 @@ func (p *Pools) entry(ctx context.Context, id uuid.UUID) (*poolEntry, error) {
 		if p.entries[id] == e {
 			delete(p.entries, id)
 		}
-		e.inUse--
+	} else if (e.retired || p.closed) && e.inUse == 0 {
+		toClose, e.db = e.db, nil
 	}
 	p.mu.Unlock()
-	if err != nil {
-		return nil, err
+	if toClose != nil {
+		toClose.Close()
 	}
-	return e, nil
 }
 
 // evictLocked removes least-recently-used idle pools until at most
@@ -279,10 +309,10 @@ func (p *Pools) Evict(tenantID uuid.UUID) {
 	}
 	delete(p.entries, tenantID)
 	var toClose *sql.DB
-	if e.inUse == 0 {
+	if e.inUse == 0 && e.db != nil {
 		toClose, e.db = e.db, nil
 	} else {
-		e.retired = true
+		e.retired = true // in use, or still opening: the last user or the opener closes it
 	}
 	p.mu.Unlock()
 	if toClose != nil {
@@ -378,9 +408,11 @@ func (p *Pools) Close() error {
 	var dbs []*sql.DB
 	for id, e := range p.entries {
 		delete(p.entries, id)
-		if e.db != nil {
+		if e.inUse == 0 && e.db != nil {
 			dbs = append(dbs, e.db)
 			e.db = nil
+		} else {
+			e.retired = true // in use, or still opening: the last user or the opener closes it
 		}
 	}
 	p.mu.Unlock()

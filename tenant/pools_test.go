@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"math/rand"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,7 +111,23 @@ func TestPoolsSaturatedTenantDoesNotStarveOthers(t *testing.T) {
 			}
 		}()
 	}
-	time.Sleep(50 * time.Millisecond) // let the ten queue on a's slot
+	// Wait until the ten are observably queued on a's slot: 2 holders + 10 waiters.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		refs := 0
+		if ts := p.slots[a]; ts != nil {
+			refs = ts.refs
+		}
+		p.mu.Unlock()
+		if refs == 12 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of 12 acquisitions queued on tenant a's slots", refs)
+		}
+		time.Sleep(time.Millisecond)
+	}
 
 	if err := acquireWithin(p, uuid.New(), 200*time.Millisecond); err != nil {
 		t.Fatalf("another tenant could not acquire while one tenant was saturated: %v", err)
@@ -328,5 +345,159 @@ func TestPoolsNeverExceedLimitsUnderLoad(t *testing.T) {
 func TestNewPoolsRejectsNonPositiveLimits(t *testing.T) {
 	if _, err := NewPools(PoolsConfig{MaxConns: 0, PerTenantMaxConns: 1, MaxWarmTenants: 1, IdleTimeout: time.Second}, nil, zap.NewNop()); err == nil {
 		t.Error("NewPools accepted MaxConns 0")
+	}
+}
+
+// blockingPools returns Pools whose opener signals on started, then waits for
+// gate to close before opening.
+func blockingPools(t *testing.T, cfg PoolsConfig) (*Pools, *stubDriver, chan struct{}, chan struct{}) {
+	t.Helper()
+	d := &stubDriver{}
+	started := make(chan struct{}, 16)
+	gate := make(chan struct{})
+	p, err := NewPools(cfg, func(context.Context, uuid.UUID) (*sql.DB, error) {
+		started <- struct{}{}
+		<-gate
+		return d.db(cfg.PerTenantMaxConns), nil
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { p.Close() })
+	return p, d, started, gate
+}
+
+func waitForInUse(t *testing.T, p *Pools, id uuid.UUID, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		p.mu.Lock()
+		got := 0
+		if e := p.entries[id]; e != nil {
+			got = e.inUse
+		}
+		p.mu.Unlock()
+		if got == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("entry in-use count = %d, want %d", got, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestPoolsCloseWhileAcquireInFlight(t *testing.T) {
+	p, d, started, gate := blockingPools(t, bigLimits)
+	a := uuid.New()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, release, err := p.Acquire(context.Background(), a)
+		if err == nil {
+			conn.Close()
+			release()
+		}
+	}()
+	<-started
+	p.Close()
+	close(gate)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Acquire did not return after Close and the opener finishing")
+	}
+	if opened, closed := d.counts(); closed != opened {
+		t.Errorf("stub connections opened %d, closed %d; a pool leaked", opened, closed)
+	}
+}
+
+func TestPoolsCloseWithConnectionInUse(t *testing.T) {
+	p, d, _ := testPools(t, bigLimits)
+	conn, release, err := p.Acquire(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "SELECT 1"); err != nil {
+		t.Fatalf("an in-use connection stopped working when Pools closed: %v", err)
+	}
+	conn.Close()
+	release()
+	if opened, closed := d.counts(); closed != opened {
+		t.Errorf("opened %d, closed %d; the pool was not closed after its last release", opened, closed)
+	}
+}
+
+func TestPoolsCancelledOpenerDoesNotFailOthers(t *testing.T) {
+	p, _, started, gate := blockingPools(t, bigLimits)
+	a := uuid.New()
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	err1 := make(chan error, 1)
+	go func() {
+		_, _, err := p.Acquire(ctx1, a)
+		err1 <- err
+	}()
+	<-started
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	type result struct {
+		conn    *sql.Conn
+		release func()
+		err     error
+	}
+	res2 := make(chan result, 1)
+	go func() {
+		c, r, err := p.Acquire(ctx2, a)
+		res2 <- result{c, r, err}
+	}()
+	waitForInUse(t, p, a, 2)
+
+	cancel1()
+	if err := <-err1; err == nil {
+		t.Error("requester 1 succeeded after its context was cancelled")
+	}
+	close(gate)
+
+	r := <-res2
+	if r.err != nil {
+		t.Fatalf("requester 2 failed because requester 1 was cancelled: %v", r.err)
+	}
+	r.conn.Close()
+	r.release()
+}
+
+func TestPoolsOpenerPanicDoesNotWedge(t *testing.T) {
+	d := &stubDriver{}
+	var calls atomic.Int32
+	p, err := NewPools(bigLimits, func(context.Context, uuid.UUID) (*sql.DB, error) {
+		if calls.Add(1) == 1 {
+			panic("boom")
+		}
+		return d.db(10), nil
+	}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+
+	a := uuid.New()
+	start := time.Now()
+	err = acquireWithin(p, a, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "panicked") {
+		t.Fatalf("first acquisition = %v, want an error mentioning \"panicked\"", err)
+	}
+	if time.Since(start) > 500*time.Millisecond {
+		t.Errorf("panicking opener took %v to report; waiters were wedged", time.Since(start))
+	}
+	if err := acquireWithin(p, a, time.Second); err != nil {
+		t.Fatalf("second acquisition = %v, want success", err)
 	}
 }
