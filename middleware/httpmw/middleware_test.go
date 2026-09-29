@@ -618,3 +618,27 @@ func TestEnforceLimitsEnforcesAResolvedTenantOnASkippedPath(t *testing.T) {
 		t.Errorf("code = %q, want PLAN_LIMIT_EXCEEDED", got)
 	}
 }
+
+// An exhausted tenant pool is load, not failure: the client should retry.
+func TestSetTenantDBReportsAnExhaustedPoolAsBusy(t *testing.T) {
+	id := uuid.New()
+	mgr := &stubManager{getTenantConn: func(context.Context, uuid.UUID) (*tenant.Conn, error) {
+		return nil, fmt.Errorf("%w: tenant is at its limit", tenant.ErrPoolExhausted)
+	}}
+	mw := New(mgr, nil, zap.NewNop(), Config{})
+
+	rec := httptest.NewRecorder()
+	Chain(okHandler(), withTenant(id, tenant.StatusActive), mw.SetTenantDB()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want %q", got, "1")
+	}
+	var body map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if got := errorCode(body); got != "TENANT_DB_BUSY" {
+		t.Errorf("code = %q, want TENANT_DB_BUSY", got)
+	}
+}

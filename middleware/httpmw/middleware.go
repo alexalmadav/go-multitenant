@@ -285,6 +285,12 @@ func (m *Middleware) SetTenantDB() func(http.Handler) http.Handler {
 			}
 			conn, err := m.manager.GetTenantConn(r.Context(), tc.TenantID)
 			if err != nil {
+				if errors.Is(err, tenant.ErrPoolExhausted) {
+					m.logger.Warn("Tenant connection pool exhausted", zap.String("tenant_id", tc.TenantID.String()), zap.Error(err))
+					w.Header().Set("Retry-After", "1")
+					m.config.ErrorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "TENANT_DB_BUSY", Message: "Tenant database is busy; retry shortly"})
+					return
+				}
 				m.logger.Error("Failed to get tenant database connection", zap.String("tenant_id", tc.TenantID.String()), zap.Error(err))
 				m.config.ErrorHandler(w, r, &tenant.TenantError{TenantID: tc.TenantID, Code: "DATABASE_ERROR", Message: "Failed to access tenant database"})
 				return

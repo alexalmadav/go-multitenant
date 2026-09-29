@@ -110,4 +110,50 @@ jobs:
           done
           echo "pgbouncer did not open port 6432" && exit 1
       - name: Root integration suite through PgBouncer
-        run: go test -count=1 -timeout 240s .
+        run: go test -count=1 -timeout 240s -skip 'RoleIsolation' .
+
+  role-pgbouncer:
+    name: Role isolation through PgBouncer (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [ auth_query, auth_file ]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_multitenant
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # The admin connection goes straight to PostgreSQL; tenant roles log in
+      # through PgBouncer.
+      TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable
+      ROLE_TEST_TENANT_DSN: postgres://postgres@127.0.0.1:6433/test_multitenant?sslmode=disable
+      PGBOUNCER_MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Start PgBouncer (${{ matrix.mode }})
+        run: scripts/ci/pgbouncer-role-setup.sh ${{ matrix.mode }}
+      - name: Point the tests at the auth file
+        if: matrix.mode == 'auth_file'
+        run: |
+          echo "PGBOUNCER_AUTH_FILE=$RUNNER_TEMP/pgb/userlist.txt" >> "$GITHUB_ENV"
+          echo "PGBOUNCER_AUTH_FILE_BASE=$RUNNER_TEMP/pgb/userlist.base" >> "$GITHUB_ENV"
+          echo "PGBOUNCER_ADMIN_DSN=postgres://postgres:postgres@127.0.0.1:6433/pgbouncer?sslmode=disable" >> "$GITHUB_ENV"
+      - name: Role isolation tests through PgBouncer
+        run: go test -count=1 -timeout 300s -run 'RoleIsolation' .
+      - name: PgBouncer log
+        if: failure()
+        run: docker logs pgbouncer-role || true

@@ -61,6 +61,13 @@ type DatabaseConfig struct {
 	ConnMaxIdleTime time.Duration `json:"conn_max_idle_time"`
 	SchemaPrefix    string        `json:"schema_prefix"`
 	MigrationsDir   string        `json:"migrations_dir"`
+
+	// Isolation selects how tenant connections are isolated. The zero value,
+	// IsolationSearchPath, is the shared-role behaviour. IsolationRole gives
+	// every tenant its own database role; see RoleIsolationConfig.
+	Isolation IsolationMode `json:"isolation"`
+	// RoleIsolation configures IsolationRole and is ignored otherwise.
+	RoleIsolation RoleIsolationConfig `json:"role_isolation"`
 }
 
 // ResolverConfig contains tenant resolution configuration

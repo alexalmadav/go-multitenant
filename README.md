@@ -401,6 +401,261 @@ CI runs the full integration suite through PgBouncer in transaction mode.
 
 Statement mode breaks multi-statement transactions themselves and is not supported.
 
+### Role isolation
+
+By default every tenant shares one database login and is scoped with
+`SET LOCAL search_path`. That stops honest mistakes, but not a query that
+names another tenant's schema — from a buggy handler or a SQL injection —
+because the shared login can read every schema.
+
+Role isolation gives every tenant its own PostgreSQL login role, with
+privileges on its own schema only. A query that reaches another tenant's data
+is then refused by PostgreSQL itself, with `permission denied`. It is opt-in:
+
+```go
+cfg.Database.Isolation = tenant.IsolationRole
+cfg.Database.RoleIsolation = tenant.RoleIsolationConfig{
+    TenantDSN: "postgres://pgbouncer.internal:6432/app", // user and password replaced per tenant
+    Secret:    secret,                                  // at least 32 bytes, distinct per environment
+}
+```
+
+Use TLS between the application and PgBouncer: derived passwords travel over
+that link.
+
+Application code does not change: `GetTenantConn`, `WithTenantTx` and the
+middleware hand out connections logged in as the tenant's role.
+
+Three things to know:
+
+- Code that calls `mt.GetDatabase()` gets the admin pool, which is outside
+  role isolation. Keep it away from request handlers.
+- After a pending tenant is activated, regenerate the `auth_file` and `RELOAD`
+  PgBouncer, or the tenant's role cannot get a PgBouncer server connection.
+- `TenantDSN` should not embed a password. The library replaces its user and
+  password with the credentials it derives for each tenant.
+
+**Requirements.** PostgreSQL 15 or later — earlier versions let every role
+create tables in `public`. The admin role in `Database.DSN` must be a
+superuser, or have `CREATEROLE` and membership in `pg_signal_backend`, which it
+uses to end a suspended tenant's sessions. `New` checks the version and these
+privileges at startup. Provisioning, rotation,
+repair and migrations must all run as that same admin role, or as a role it
+is a member of: PostgreSQL 16 lets a `CREATEROLE` role manage only the roles
+it created, and a role can grant only on tables it owns or whose owner it is a
+member of. Migrations run by an unrelated user are not supported.
+
+**Enabling it on an existing deployment.** Tenants without a role cannot
+connect in role mode, so the order matters:
+
+1. Run `mt.EnsureTenantRoles(ctx)` once, from a one-off job or from a single
+   instance built with the role-mode config, before that config takes traffic.
+2. If you use an `auth_file`, render it and `RELOAD` PgBouncer.
+3. Roll out the role-mode config to the serving instances.
+
+`EnsureTenantRoles` is idempotent and doubles as the repair tool: it
+creates a missing role, resets the role's password, `LOGIN` state and grants,
+and resets its attributes to `NOINHERIT NOCREATEDB NOCREATEROLE NOSUPERUSER
+NOREPLICATION NOBYPASSRLS`. A `CREATEROLE` admin that is not a superuser can
+reset only `NOINHERIT` and `NOCREATEROLE`; it resets the other attributes
+only when it holds them itself. Each role is guarded by an advisory lock, so
+concurrent runs are safe. It does not visit cancelled tenants.
+
+**What each tenant role can do.** `SELECT`, `INSERT`, `UPDATE` and `DELETE`
+on its own tables, and use its own sequences. It cannot read another tenant's
+schema or `public.tenants`, run DDL, or `SET ROLE` to anyone. System catalogs
+stay readable by every role, so a tenant can list other schema and role
+names — which contain tenant ids — but never their data. Extensions that grant
+functions to `PUBLIC` extend every tenant role too; audit what is installed.
+
+**Migrations.** `multitenant.New` wraps `mt.Migrations` so that grants are
+reapplied after every migration run, in case a migration created tables that
+default privileges do not cover. The grant runs even when the migration
+fails, because a failed run may have created tables first; the migration error
+and any grant error are returned joined. If you build your own migration
+manager, wrap it:
+
+```go
+migrations := database.NewGrantingMigrationManager(inner, roles, repo, schemas)
+```
+
+where `roles` is a `database.TenantRoles` (such as a `*database.RoleManager`),
+`repo` is your `tenant.Repository` and `schemas` your `tenant.SchemaManager`.
+The decorator grants only on provisioned tenants.
+
+**Suspension and cancellation.** `ValidateTenant` still refuses a suspended
+tenant's requests immediately, in every instance. Behind it, when a tenant is
+suspended or cancelled, its role is locked out (`NOLOGIN`, sessions ended) and
+its warm pool in this process is evicted before anything else runs, so the
+database refuses it too. Errors from the lockout and the follow-up role update
+are joined and returned. Other application instances drop their now-dead pool
+entries after `IdleTimeout`.
+
+**Deleting a tenant.** Deleting drops the tenant's role. If `DeleteTenant`
+fails part-way, the role may remain: the error is returned, so retry the
+delete or drop the role by hand. `EnsureTenantRoles` will not clean it up.
+
+**Connection limits.** Each tenant gets a small pool, created on first use:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `MaxConns` | 50 | connections in use at once, all tenants |
+| `PerTenantMaxConns` | 5 | connections in use at once, one tenant |
+| `MaxWarmTenants` | 1,000 | tenant pools kept open |
+| `IdleTimeout` | 5 min | an idle pool closes after this |
+
+A request that cannot get a connection before its context ends is answered
+`503 TENANT_DB_BUSY` with `Retry-After: 1`. The defaults assume a pooler.
+**Pointed straight at PostgreSQL**, every warm pool holds a real backend, so
+`MaxConns + MaxWarmTenants` must fit inside `max_connections` with the admin
+pool — the defaults would not. `mt.TenantPoolStats()` reports hits, cold
+opens, evictions and slot waits; a high share of cold opens means your active
+tenants do not fit.
+
+**Throughput.** A connection logged in as one tenant cannot serve another,
+so when traffic spreads across many tenants at once, many transactions pay
+for a fresh login. Measured on a laptop with 20 server connections, one
+tenant ran about 48,000 transactions per second and 5,000 uniformly random
+tenants about 550 through PgBouncer's `auth_query`, or 120 with an
+`auth_file`. Real traffic concentrates on fewer tenants and real hardware is
+faster, but this is the trade: role isolation spends peak throughput under
+wide tenant spread on a boundary the database enforces.
+
+#### Behind PgBouncer
+
+Each tenant logs in to PgBouncer as its own role, so PgBouncer must know
+thousands of credentials. Two ways work; prefer `auth_query`.
+
+**`auth_query` — self-hosted PostgreSQL with a superuser.** PgBouncer fetches
+each role's verifier on login, so new tenants work immediately. As a
+superuser, create the lookup function:
+
+```sql
+CREATE ROLE pgbouncer_auth LOGIN PASSWORD '...';
+CREATE FUNCTION public.pgbouncer_get_auth(p_usename text)
+RETURNS TABLE (usename name, passwd text)
+LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog AS
+$$ SELECT usename, passwd FROM pg_catalog.pg_shadow WHERE usename = p_usename $$;
+REVOKE ALL ON FUNCTION public.pgbouncer_get_auth(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.pgbouncer_get_auth(text) TO pgbouncer_auth;
+```
+
+```ini
+auth_type  = scram-sha-256
+auth_file  = /etc/pgbouncer/userlist.txt   ; holds "pgbouncer_auth" "<plaintext password>"
+auth_user  = pgbouncer_auth
+auth_query = SELECT usename, passwd FROM public.pgbouncer_get_auth($1)
+```
+
+The `auth_user` entry must be a plaintext password: PgBouncer logs in as that
+user itself and cannot do so from a verifier.
+
+`auth_query` runs in the client's target database, so `pgbouncer_get_auth`
+must exist in every database PgBouncer serves.
+
+**`auth_file` — managed PostgreSQL (RDS, Cloud SQL and others).** These grant
+no superuser, so nothing can read verifiers. Render the file instead.
+`mt.PgBouncerAuthFile` (and `database.WriteAuthFile`, which it calls) writes to
+an `io.Writer`; the caller owns the file. Write to a temp file created with
+mode `0600`, rename it into place only on success, and discard it if an error
+comes back:
+
+```go
+func renderAuthFile(ctx context.Context, mt *multitenant.MultiTenant, path string) (err error) {
+    f, err := os.CreateTemp(filepath.Dir(path), "userlist-*.tmp") // mode 0600
+    if err != nil {
+        return err
+    }
+    defer func() {
+        if err != nil {
+            os.Remove(f.Name()) // discard: never install a partial or failed file
+        }
+    }()
+    if _, err = f.WriteString(`"admin" "..."` + "\n"); err != nil { // your fixed entries
+        f.Close()
+        return err
+    }
+    if err = mt.PgBouncerAuthFile(ctx, f); err != nil {
+        f.Close()
+        return err
+    }
+    if err = f.Sync(); err != nil {
+        f.Close()
+        return err
+    }
+    if err = f.Close(); err != nil {
+        return err
+    }
+    return os.Rename(f.Name(), path)
+    // then run RELOAD on PgBouncer's admin console
+}
+```
+
+- The file holds **plaintext derived passwords**, so it is a secret: `0600`,
+  on a volume only PgBouncer and the renderer can read. Verifiers are not an
+  option — PgBouncer 1.25.2 locks a role out after a failed first login when
+  given verifiers in an auth file.
+- The file lists only **active, provisioned** tenants. It rejects any role
+  name or password containing NUL, CR or LF, naming the role but never the
+  password, and returns an error; a tenant with no password (see
+  `Credentials` below) also cannot be listed.
+- **A tenant cannot connect until the file is regenerated and PgBouncer
+  reloaded.** That covers a new tenant and any tenant that becomes active:
+  a pending tenant being activated, or a suspended one being reactivated.
+  Regenerate the file and `RELOAD` PgBouncer after each. Run the renderer as a
+  small sidecar on an interval or after those events. The reload itself is
+  fast — 2.6 ms for 5,000 entries.
+- **PostgreSQL, not PgBouncer, enforces suspension.** In `auth_file` mode
+  PgBouncer keeps a user it has loaded in memory after that user is removed
+  from the file and `RELOAD` is run. A suspended tenant's client can therefore
+  still open a PgBouncer session, but the server refuses it: the role is
+  `NOLOGIN` and its sessions have been terminated. Do not rely on removing
+  the entry to lock a tenant out.
+- Plaintext entries make PgBouncer do SCRAM key derivation for every login,
+  on its single thread; expect about 4.5× lower throughput under wide tenant
+  spread than with `auth_query`, or run several PgBouncer processes with
+  `so_reuseport`.
+
+**Either mode:**
+
+- Raise PgBouncer's file-descriptor limit to cover
+  `MaxWarmTenants × application instances` plus its server connections.
+  Container defaults are often 1,024, and running out shows up only as
+  connection timeouts at the client, with `accept() failed: No file
+  descriptors available` in PgBouncer's log.
+- After a failed server login — a suspended tenant's role, say — PgBouncer
+  refuses that role for `server_login_retry` seconds, 15 by default. A tenant
+  you reactivate can therefore see errors for that long. Lower the setting if
+  that matters.
+
+#### Rotating the secret
+
+1. Deploy with `Secret` set to the new key and `PreviousSecrets: [][]byte{old}`.
+   Every new connection tries the key that last worked first and falls back to
+   the others when authentication fails, so a pool opened before step 2 keeps
+   working after it.
+2. Run `mt.RotateTenantCredentials(ctx)`.
+3. With an `auth_file`, regenerate it and reload PgBouncer immediately.
+4. Remove the old key from `PreviousSecrets`.
+
+With `auth_query` or direct connections nothing is interrupted. With an
+`auth_file`, between steps 2 and 3 a tenant that needs a new PgBouncer server
+connection cannot get one, so keep that gap short and rotate in a quiet
+period.
+
+`RoleIsolationConfig.Credentials` replaces derived passwords with your own —
+from a secrets manager, say. It has the signature
+`func(tenantID uuid.UUID) (password string, err error)`: the role name is
+always the tenant's schema name. Returning an empty password leaves
+authentication to `pg_hba.conf`, for client certificates or cloud IAM; such
+tenants cannot go through an `auth_file`.
+
+#### Testing role isolation
+
+The role-mode integration tests need a PostgreSQL that uses password
+authentication; point `TEST_DATABASE_URL` at one. On a trust-auth server they
+skip, since any password logs in there, and they fail when `CI` is set.
+
 ## 📋 Tenant Management
 
 ### Creating Tenants
@@ -570,6 +825,10 @@ themselves: the adapter never reads `multitenant.Config.Membership`, so
 setting it satisfies `New` without protecting a Gin chain. Pass the same
 `Membership` to `ginmiddleware.Config` and add `RequireMembership()` to the
 chain; see the Gin section above.
+
+Membership decides who may enter a tenant. What a tenant's connection can
+reach once inside is a separate question, answered by the isolation mode;
+see *Role isolation* for the mode in which PostgreSQL itself enforces it.
 
 Role and permission checks stay yours — the library has no role model.
 

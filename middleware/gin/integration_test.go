@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,27 +21,56 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 )
 
-// testDSN returns TEST_DATABASE_URL or the local default, skipping when unreachable.
+// testDSN returns TEST_DATABASE_URL, or else a throwaway database on the local
+// PostgreSQL that is dropped when the test ends, skipping when unreachable.
 func testDSN(t *testing.T) string {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("short mode")
 	}
-	dsn := os.Getenv("TEST_DATABASE_URL")
-	if dsn == "" {
-		dsn = "postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
+	if dsn := os.Getenv("TEST_DATABASE_URL"); dsn != "" {
+		db, err := openDB(dsn)
+		if err != nil {
+			t.Skipf("no database: %v", err)
+		}
+		db.Close()
+		return dsn
 	}
+	const server = "postgres://postgres:postgres@localhost:5432/postgres?sslmode=disable"
+	admin, err := openDB(server)
+	if err != nil {
+		t.Skipf("no database: %v", err)
+	}
+	name := "mt_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	if _, err := admin.Exec("CREATE DATABASE " + name); err != nil {
+		admin.Close()
+		t.Fatalf("create throwaway database: %v", err)
+	}
+	// Registered first, so it runs after the test's own cleanups have closed
+	// their pools.
+	t.Cleanup(func() {
+		defer admin.Close()
+		_, _ = admin.Exec("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", name)
+		_, _ = admin.Exec("DROP DATABASE IF EXISTS " + name)
+	})
+	u, _ := url.Parse(server)
+	u.Path = "/" + name
+	return u.String()
+}
+
+// openDB opens and pings dsn with pgx in simple protocol mode.
+func openDB(dsn string) (*sql.DB, error) {
 	cfg, err := pgx.ParseConfig(dsn)
 	if err != nil {
-		t.Skipf("bad DSN: %v", err)
+		return nil, err
 	}
 	cfg.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 	db := stdlib.OpenDB(*cfg)
-	defer db.Close()
 	if err := db.Ping(); err != nil {
-		t.Skipf("no database: %v", err)
+		db.Close()
+		return nil, err
 	}
-	return dsn
+	return db, nil
 }
 
 func TestIntegration_SetTenantDBThroughAdapter(t *testing.T) {

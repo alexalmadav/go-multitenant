@@ -89,9 +89,10 @@ type MultiTenant struct {
 	// Limits is the limit checker built from Config.Limits, or nil when no
 	// limits were configured. Use it to check limits, read usage, and adjust
 	// plans at runtime.
-	Limits limits.Checker
-	db     *sql.DB
-	logger *zap.Logger
+	Limits        limits.Checker
+	roleIsolation *roleIsolation
+	db            *sql.DB
+	logger        *zap.Logger
 }
 
 // New creates a new MultiTenant instance with the provided configuration
@@ -116,6 +117,16 @@ func New(config Config) (*MultiTenant, error) {
 	case config.InsecureSkipMembership:
 		logger.Warn("InsecureSkipMembership is set: requests are scoped to a tenant " +
 			"without checking that the caller belongs to it")
+	}
+
+	switch config.Database.Isolation {
+	case tenant.IsolationSearchPath:
+	case tenant.IsolationRole:
+		if err := config.Database.RoleIsolation.Validate(config.Database.SchemaPrefix); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("multitenant: unknown Database.Isolation %q", config.Database.Isolation)
 	}
 
 	// Validate the migrations directory early so a typo is visible at startup.
@@ -148,12 +159,28 @@ func New(config Config) (*MultiTenant, error) {
 	// Create schema manager
 	schemaManager := database.NewSchemaManager(db, logger, config.Database.SchemaPrefix)
 
-	// Create migration manager
-	// Note: Applications should specify their own migrations directory path
 	migrationMgr := database.NewMigrationManager(db, logger, config.Database.MigrationsDir, schemaManager, repository)
 
-	// Create tenant manager
+	// Role isolation wraps the migration manager, so every run re-grants the
+	// tenant roles, and the manager, so tenant connections log in as those
+	// roles. The isolation hook is registered first, before any application
+	// hook, so an application's own provisioning hook can already use tenant
+	// connections.
+	var ri *roleIsolation
+	if config.Database.Isolation == tenant.IsolationRole {
+		ri, err = setupRoleIsolation(context.Background(), config.Database.RoleIsolation.WithDefaults(), db, schemaManager, repository, logger)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		migrationMgr = database.NewGrantingMigrationManager(migrationMgr, ri.roles, repository, schemaManager)
+	}
+
 	manager := tenant.NewManager(config.Config, db, repository, schemaManager, migrationMgr, logger)
+	if ri != nil {
+		manager.RegisterHook(database.NewRoleHook(ri.roles, schemaManager, ri.pools.Evict, logger))
+		manager = tenant.NewRoleIsolatedManager(manager, ri.pools, schemaManager.GetSchemaName, logger)
+	}
 
 	// Create resolver
 	resolver := tenant.NewResolver(config.Resolver, repository, logger)
@@ -167,6 +194,9 @@ func New(config Config) (*MultiTenant, error) {
 		checker = limits.NewChecker(*config.Limits, repository, logger)
 		tracker, err := postgres.NewUsageTracker(db, schemaManager, config.Limits.UsageTables, logger)
 		if err != nil {
+			if ri != nil {
+				ri.pools.Close()
+			}
 			db.Close()
 			return nil, fmt.Errorf("failed to configure usage tracker: %w", err)
 		}
@@ -195,6 +225,7 @@ func New(config Config) (*MultiTenant, error) {
 		Migrations:     migrationMgr,
 		HTTPMiddleware: httpMw,
 		Limits:         checker,
+		roleIsolation:  ri,
 		db:             db,
 		logger:         logger,
 	}, nil

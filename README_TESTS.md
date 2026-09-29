@@ -92,8 +92,10 @@ go test ./tenant -run TestValidateStatus
 Integration tests require a PostgreSQL database. Set up the database and environment:
 
 ```bash
-# Optional: point at an existing database. Without it, a local PostgreSQL on
-# localhost:5432 is used if present, otherwise a container is started via Docker.
+# Optional: point at an existing database, used as is. Without it, a local
+# PostgreSQL on localhost:5432 is used if present: each test creates its own
+# mt_test_<id> database there and drops it when the test ends. Otherwise a
+# container is started via Docker.
 export TEST_DATABASE_URL="postgres://postgres:postgres@localhost:5432/test_multitenant?sslmode=disable"
 
 # Run all tests including integration tests

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"runtime"
+	"sync/atomic"
 )
 
 // Conn is a dedicated database connection scoped to one tenant's schema.
@@ -22,14 +24,32 @@ type Conn struct {
 	conn       *sql.Conn
 	schemaName string
 	searchPath string // the SET LOCAL statement, built once
+	release    func() // returns the connection's pool slots; nil for the shared pool
+	closed     atomic.Bool
 }
 
 func newConn(conn *sql.Conn, schemaName string) *Conn {
-	return &Conn{
+	return newPooledConn(conn, schemaName, nil, nil)
+}
+
+// newPooledConn is newConn for a connection drawn from Pools: Close also
+// calls release, and if the Conn is garbage-collected without Close, onLeak
+// reports it.
+func newPooledConn(conn *sql.Conn, schemaName string, release, onLeak func()) *Conn {
+	c := &Conn{
 		conn:       conn,
 		schemaName: schemaName,
 		searchPath: fmt.Sprintf(`SET LOCAL search_path TO "%s", public`, schemaName),
+		release:    release,
 	}
+	if onLeak != nil {
+		runtime.SetFinalizer(c, func(c *Conn) {
+			if !c.closed.Load() {
+				onLeak()
+			}
+		})
+	}
+	return c
 }
 
 // SchemaName returns the tenant schema this connection is scoped to.
@@ -100,7 +120,12 @@ func (c *Conn) Close() error {
 	if c == nil || c.conn == nil {
 		return nil
 	}
-	return c.conn.Close()
+	c.closed.Store(true)
+	err := c.conn.Close()
+	if c.release != nil {
+		c.release()
+	}
+	return err
 }
 
 // Rows is a *sql.Rows whose Close also commits the scoping transaction.
